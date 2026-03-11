@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>Bounce Maze ⚽</title>
+<title>Bounce Maze</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -23,7 +23,7 @@ canvas { display: block; touch-action: none; cursor: crosshair; }
 <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
 <script>
 // ============================================================
-//  BOUNCE MAZE  ⚽  Physics Puzzle
+//  BOUNCE MAZE  –  Physics Puzzle
 // ============================================================
 
 const C  = document.getElementById('c');
@@ -48,32 +48,52 @@ const { Engine, Bodies, Body, World, Events } = Matter;
 let engine, world;
 
 function mkEngine() {
-  if (engine) World.clear(world, false);
+  if (engine) { Events.off(engine); World.clear(world, false); Engine.clear(engine); }
   engine = Engine.create({ gravity: { x: 0, y: 1, scale: 0.0014 } });
   world  = engine.world;
 }
 
+// ── Constants ──────────────────────────────────────────────
+const S       = { MENU: 0, AIM: 1, FLY: 2, WIN: 3, FAIL: 4 };
+const MAX_PWR = 38, BALL_R = 11;
+const TRAJ_GR = 0.50, REST = 0.78;
+const LEVEL_BASE = [100, 150, 200, 300, 450, 500, 550, 600, 700, 800, 900, 1000];
+
 // ── State ──────────────────────────────────────────────────
-const S = { MENU: 0, AIM: 1, FLY: 2, WIN: 3, FAIL: 4 };
-let gs        = S.MENU;
-let lvlIdx    = 0;
-let shots     = 0;
-let stopTmr   = 0;
-let particles = [];
-let trail     = [];
-let ballBody  = null;
-let wallBodies = [];
+let gs         = S.MENU;
+let lvlIdx     = 0;
+let shots      = 0;
+let stopTmr    = 0;
+let particles  = [];
+let floatTexts = [];
+let trail      = [];
+let ballBody   = null;
+let wallBodies = [];       // { body, isBorder, isMoving }
+let movingWallDefs = [];   // { body, ox, oy, axis, range, speed, t }
+let bumperBodies   = [];   // { body }
+let portalPairs    = [];   // { bodyA, bodyB, ox1,oy1, ox2,oy2, r, cooldown }
+let goalSensorBody = null;
 let mx = GW/2, my = GH/2, dragging = false;
 let ballStart = { x: 0, y: 0 };
 
-// ── Scoring ────────────────────────────────────────────────
-let totalScore  = 0;
-let levelScore  = 0;
-let levelStars  = 0;
-let bestScores  = JSON.parse(localStorage.getItem('bm_best') || '{}'); // { lvlIdx: stars }
-let grandBest   = parseInt(localStorage.getItem('bm_grand') || '0');
+// Combo
+let bounceCount = 0;
+let comboMult   = 1;
 
-const LEVEL_BASE = [100, 150, 200, 300, 450, 600, 1000]; // points per level
+// Ghost replay
+let ghostFrames      = [];
+let currentRunRecord = [];
+let ghostIdx         = 0;
+
+// Daily
+let isDailyChallenge = false;
+
+// ── Scoring ────────────────────────────────────────────────
+let totalScore = 0;
+let levelScore = 0;
+let levelStars = 0;
+let bestScores = JSON.parse(localStorage.getItem('bm_best') || '{}');
+let grandBest  = parseInt(localStorage.getItem('bm_grand') || '0');
 
 function calcStars(shotsUsed, maxShots) {
   const pct = shotsUsed / maxShots;
@@ -82,47 +102,42 @@ function calcStars(shotsUsed, maxShots) {
   return 1;
 }
 
-function calcScore(stars, lvl) {
-  return LEVEL_BASE[lvl] * stars;
-}
-
 // ── Levels ─────────────────────────────────────────────────
-// walls: [cx, cy, w, h, angle=0]
-// goal:  [gx, gy, radius]
 const LEVELS = [
   {
-    // Tutorial: straight shot, huge goal, no walls
     name: 'First Shot',
     sub:  'Drag the ball to aim',
     shots: 8,
     ball: [200, 530],
     goal: [200, 120, 36],
-    walls: []
+    walls: [],
+    movingWalls: [],
+    bumpers: [],
+    teleporters: []
   },
   {
-    // Intro walls: one wall blocks direct path, must go around or bounce
     name: 'Side Step',
     sub:  'One wall in the way',
     shots: 6,
     ball: [80, 560],
     goal: [320, 140, 28],
-    walls: [
-      [200, 360, 14, 260],  // vertical wall in the middle
-    ]
+    walls: [[200, 360, 14, 260]],
+    movingWalls: [],
+    bumpers: [],
+    teleporters: []
   },
   {
-    // First real bounce: one platform to bounce off
     name: 'First Bounce',
     sub:  'Bounce off the platform',
     shots: 5,
     ball: [60, 580],
     goal: [340, 130, 24],
-    walls: [
-      [310, 390, 180, 14],  // horizontal platform on right
-    ]
+    walls: [[310, 390, 180, 14]],
+    movingWalls: [],
+    bumpers: [],
+    teleporters: []
   },
   {
-    // Two bounces, generous goal
     name: 'Two Step',
     sub:  'Two bounces needed',
     shots: 4,
@@ -130,11 +145,13 @@ const LEVELS = [
     goal: [340, 110, 20],
     walls: [
       [240, 490, 220, 13],
-      [110, 320, 170, 13],
-    ]
+      [110, 320, 170, 13]
+    ],
+    movingWalls: [],
+    bumpers: [],
+    teleporters: []
   },
   {
-    // Zigzag, tighter goal
     name: 'Zigzag',
     sub:  'Thread the needle',
     shots: 3,
@@ -144,26 +161,112 @@ const LEVELS = [
       [255, 510, 250, 12],
       [ 90, 390, 190, 12],
       [290, 270, 220, 12],
-      [ 90, 155, 180, 12],
-    ]
+      [ 90, 155, 180, 12]
+    ],
+    movingWalls: [],
+    bumpers: [],
+    teleporters: []
   },
   {
-    // The Box: enlarged goal + 3 shots so it's frustrating but beatable
+    name: 'The Gauntlet',
+    sub:  'Walls are moving!',
+    shots: 4,
+    ball: [60, 610],
+    goal: [340, 90, 19],
+    walls: [],
+    movingWalls: [
+      [200, 480, 150, 14, 0, 'x', 160, 1.2],
+      [200, 330, 150, 14, 0, 'x', 160, 1.8],
+      [200, 200, 150, 14, 0, 'x', 140, 1.0]
+    ],
+    bumpers: [],
+    teleporters: []
+  },
+  {
+    name: 'Mirror Run',
+    sub:  'Use the portal!',
+    shots: 4,
+    ball: [60, 570],
+    goal: [340, 100, 18],
+    walls: [[200, 400, 14, 300]],
+    movingWalls: [],
+    bumpers: [],
+    teleporters: [[80, 280, 320, 280, 22]]
+  },
+  {
+    name: 'Bumper Car',
+    sub:  'Pinball time!',
+    shots: 4,
+    ball: [50, 600],
+    goal: [350, 90, 18],
+    walls: [],
+    movingWalls: [],
+    bumpers: [
+      [130, 460, 22],
+      [270, 380, 22],
+      [130, 300, 22],
+      [270, 220, 22],
+      [200, 160, 18]
+    ],
+    teleporters: []
+  },
+  {
     name: 'The Box',
-    sub:  "Find the gap...",
+    sub:  'Find the gap...',
     shots: 3,
     ball: [200, 610],
     goal: [55, 90, 20],
     walls: [
       [255, 450, 200, 12],
-      [355, 370, 12, 160],
+      [355, 370,  12, 160],
       [255, 290, 200, 12],
-      [ 90, 390, 12, 320],
-    ]
+      [ 90, 390,  12, 320]
+    ],
+    movingWalls: [],
+    bumpers: [],
+    teleporters: []
   },
   {
-    // Rage: 2 shots instead of 1 — still brutal but not impossible
-    name: '☠ RAGE MODE ☠',
+    name: 'Death Trap',
+    sub:  'Moving walls + bumpers',
+    shots: 3,
+    ball: [50, 640],
+    goal: [360, 60, 16],
+    walls: [
+      [200, 560, 14, 120],
+      [200, 280, 14, 120]
+    ],
+    movingWalls: [
+      [200, 430, 130, 12, 0, 'x', 130, 2.0],
+      [200, 175, 130, 12, 0, 'x', 120, 1.5]
+    ],
+    bumpers: [
+      [340, 380, 18],
+      [ 60, 300, 18]
+    ],
+    teleporters: []
+  },
+  {
+    name: 'The Matrix',
+    sub:  'Everything at once',
+    shots: 2,
+    ball: [60, 640],
+    goal: [340, 60, 15],
+    walls: [
+      [100, 500, 14, 200],
+      [300, 350, 14, 200]
+    ],
+    movingWalls: [
+      [200, 420, 120, 12, 0, 'y', 80, 1.5]
+    ],
+    bumpers: [
+      [200, 300, 20],
+      [200, 180, 18]
+    ],
+    teleporters: [[70, 360, 330, 230, 20]]
+  },
+  {
+    name: '\u2620 RAGE MODE \u2620',
     sub:  '2 shots. Tiny goal. Good luck.',
     shots: 2,
     ball: [45, 640],
@@ -174,76 +277,186 @@ const LEVELS = [
       [140, 295, 250, 12,  0.12],
       [310, 180, 200, 12, -0.18],
       [200, 105, 240, 12],
-      [378, 150,  12,  88],
-    ]
+      [378, 150,  12,  88]
+    ],
+    movingWalls: [],
+    bumpers: [],
+    teleporters: []
   }
 ];
 
-// ── Load level ─────────────────────────────────────────────
-function loadLevel(idx) {
+// ── Daily Challenge ────────────────────────────────────────
+function getDailyInfo() {
+  const now   = new Date();
+  const y     = now.getFullYear(), mo = now.getMonth() + 1, d = now.getDate();
+  const seed  = y * 10000 + mo * 100 + d;
+  const lvl   = seed % (LEVELS.length - 1) + 1;
+  const dateStr = `${y}-${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+  const done  = localStorage.getItem('bm_daily_date') === dateStr;
+  const score = parseInt(localStorage.getItem('bm_daily_score') || '0');
+  return { lvl, dateStr, done, score };
+}
+
+function saveDailyComplete(score) {
+  const { dateStr } = getDailyInfo();
+  localStorage.setItem('bm_daily_date', dateStr);
+  localStorage.setItem('bm_daily_score', score);
+}
+
+// ── Load Level ─────────────────────────────────────────────
+function loadLevel(idx, isDaily) {
+  isDaily = !!isDaily;
+  isDailyChallenge = isDaily;
+  lvlIdx = idx;
   mkEngine();
-  wallBodies = []; ballBody = null;
-  particles = []; trail = [];
-  shots = 0; stopTmr = 0;
-  gs = S.AIM;
+
+  wallBodies     = [];
+  movingWallDefs = [];
+  bumperBodies   = [];
+  portalPairs    = [];
+  goalSensorBody = null;
+  ballBody       = null;
+  particles      = [];
+  floatTexts     = [];
+  trail          = [];
+  shots          = 0;
+  stopTmr        = 0;
+  bounceCount    = 0;
+  comboMult      = 1;
+  currentRunRecord = [];
+  ghostIdx       = 0;
+  levelScore     = 0;
+
+  // Load ghost from localStorage
+  const ghostKey = `bm_ghost_${idx}`;
+  const ghostRaw = localStorage.getItem(ghostKey);
+  ghostFrames = ghostRaw ? JSON.parse(ghostRaw) : [];
 
   const L = LEVELS[idx];
   ballStart = { x: L.ball[0], y: L.ball[1] };
 
   // Borders
-  const borders = [
-    [GW/2, GH+10, GW, 20, 0],
-    [-10,  GH/2,  20, GH, 0],
-    [GW+10,GH/2,  20, GH, 0],
-    [GW/2, -10,   GW, 20, 0],
+  const borderDefs = [
+    [GW/2, GH+10, GW, 20],
+    [-10,  GH/2,  20, GH],
+    [GW+10,GH/2,  20, GH],
+    [GW/2, -10,   GW, 20]
   ];
-  for (const [bx,by,bw,bh,ba] of borders) {
-    const b = Bodies.rectangle(bx,by,bw,bh,
-      { isStatic:true, restitution:0.80, friction:0.0, label:'wall' });
-    Body.setAngle(b, ba);
+  for (const [bx, by, bw, bh] of borderDefs) {
+    const b = Bodies.rectangle(bx, by, bw, bh,
+      { isStatic: true, restitution: 0.80, friction: 0.0, label: 'wall' });
     World.add(world, b);
-    wallBodies.push({ body:b, isBorder:true });
+    wallBodies.push({ body: b, isBorder: true, isMoving: false });
   }
 
-  // Level walls
-  for (const [wx,wy,ww,wh,wa=0] of L.walls) {
-    const b = Bodies.rectangle(wx,wy,ww,wh,
-      { isStatic:true, restitution:0.80, friction:0.0, label:'wall' });
+  // Static walls
+  for (const [wx, wy, ww, wh, wa = 0] of (L.walls || [])) {
+    const b = Bodies.rectangle(wx, wy, ww, wh,
+      { isStatic: true, restitution: 0.80, friction: 0.0, label: 'wall' });
     Body.setAngle(b, wa);
     World.add(world, b);
-    wallBodies.push({ body:b, isBorder:false });
+    wallBodies.push({ body: b, isBorder: false, isMoving: false });
   }
 
-  // Ball (static until shot)
-  ballBody = Bodies.circle(L.ball[0], L.ball[1], 11, {
-    restitution:0.80, friction:0.0, frictionAir:0.012,
-    density:0.003, label:'ball', isStatic:true
+  // Moving walls
+  for (const [cx, cy, ww, wh, wa, axis, range, speed] of (L.movingWalls || [])) {
+    const b = Bodies.rectangle(cx, cy, ww, wh,
+      { isStatic: true, restitution: 0.80, friction: 0.0, label: 'wall' });
+    Body.setAngle(b, wa || 0);
+    World.add(world, b);
+    wallBodies.push({ body: b, isBorder: false, isMoving: true });
+    movingWallDefs.push({ body: b, ox: cx, oy: cy, axis, range, speed, t: Math.random() * Math.PI * 2 });
+  }
+
+  // Bumpers
+  for (const [bx, by, br] of (L.bumpers || [])) {
+    const b = Bodies.circle(bx, by, br,
+      { isStatic: true, restitution: 1.3, friction: 0.0, label: 'bumper' });
+    World.add(world, b);
+    bumperBodies.push({ body: b });
+  }
+
+  // Teleporters
+  for (const [x1, y1, x2, y2, r] of (L.teleporters || [])) {
+    const bA = Bodies.circle(x1, y1, r,
+      { isStatic: true, isSensor: true, label: 'portalA' });
+    const bB = Bodies.circle(x2, y2, r,
+      { isStatic: true, isSensor: true, label: 'portalB' });
+    World.add(world, bA);
+    World.add(world, bB);
+    portalPairs.push({ bodyA: bA, bodyB: bB, ox1: x1, oy1: y1, ox2: x2, oy2: y2, r, cooldown: 0 });
+  }
+
+  // Ball
+  ballBody = Bodies.circle(L.ball[0], L.ball[1], BALL_R, {
+    restitution: 0.80, friction: 0.0, frictionAir: 0.012,
+    density: 0.003, label: 'ball', isStatic: true
   });
   World.add(world, ballBody);
 
   // Goal sensor
-  const goalSensor = Bodies.circle(L.goal[0], L.goal[1], L.goal[2]+5, {
-    isStatic:true, isSensor:true, label:'goal'
+  goalSensorBody = Bodies.circle(L.goal[0], L.goal[1], L.goal[2] + 4, {
+    isStatic: true, isSensor: true, label: 'goal'
   });
-  World.add(world, goalSensor);
+  World.add(world, goalSensorBody);
 
+  // Collision handler
   Events.on(engine, 'collisionStart', evt => {
     for (const { bodyA, bodyB } of evt.pairs) {
-      const a = bodyA.label, b = bodyB.label;
-      if (gs === S.FLY) {
-        if ((a==='ball'&&b==='goal')||(a==='goal'&&b==='ball')) win();
-        if ((a==='ball'&&b==='wall')||(a==='wall'&&b==='ball')) {
-          const p = a==='ball' ? bodyA.position : bodyB.position;
-          burst(p.x, p.y, '#ff7043', 10);
+      const la = bodyA.label, lb = bodyB.label;
+      if (gs !== S.FLY) continue;
+
+      // Win
+      if ((la === 'ball' && lb === 'goal') || (la === 'goal' && lb === 'ball')) {
+        win(); continue;
+      }
+
+      // Wall bounce
+      if ((la === 'ball' && lb === 'wall') || (la === 'wall' && lb === 'ball')) {
+        const pos = la === 'ball' ? bodyA.position : bodyB.position;
+        bounceCount++;
+        comboMult = 1 + bounceCount * 0.1;
+        floatTexts.push({ x: pos.x, y: pos.y, text: `+x${comboMult.toFixed(1)}`, life: 1, col: '#ffd700' });
+        burst(pos.x, pos.y, '#ff7043', 8);
+      }
+
+      // Bumper bounce
+      if ((la === 'ball' && lb === 'bumper') || (la === 'bumper' && lb === 'ball')) {
+        const pos = la === 'ball' ? bodyA.position : bodyB.position;
+        bounceCount++;
+        comboMult = 1 + bounceCount * 0.1;
+        floatTexts.push({ x: pos.x, y: pos.y, text: `+x${comboMult.toFixed(1)}`, life: 1, col: '#a855f7' });
+        burst(pos.x, pos.y, '#a855f7', 12);
+      }
+
+      // Portal teleport
+      const isPortalA = la === 'portalA' || lb === 'portalA';
+      const isPortalB = la === 'portalB' || lb === 'portalB';
+      if ((la === 'ball' || lb === 'ball') && (isPortalA || isPortalB)) {
+        for (const pp of portalPairs) {
+          if (pp.cooldown > 0) continue;
+          const hitA = (la === 'portalA' && bodyA === pp.bodyA) || (lb === 'portalA' && bodyB === pp.bodyA);
+          const hitB = (la === 'portalB' && bodyA === pp.bodyB) || (lb === 'portalB' && bodyB === pp.bodyB);
+          if (hitA) {
+            Body.setPosition(ballBody, { x: pp.ox2, y: pp.oy2 });
+            pp.cooldown = 40;
+            burst(pp.ox2, pp.oy2, '#a855f7', 18);
+            burst(pp.ox1, pp.oy1, '#60a5fa', 12);
+          } else if (hitB) {
+            Body.setPosition(ballBody, { x: pp.ox1, y: pp.oy1 });
+            pp.cooldown = 40;
+            burst(pp.ox1, pp.oy1, '#a855f7', 18);
+            burst(pp.ox2, pp.oy2, '#60a5fa', 12);
+          }
         }
       }
     }
   });
+
+  gs = S.AIM;
 }
 
 // ── Shoot ──────────────────────────────────────────────────
-const MAX_PWR = 38, BALL_R = 11;
-
 function shoot(tx, ty) {
   if (gs !== S.AIM) return;
   const L = LEVELS[lvlIdx];
@@ -256,22 +469,30 @@ function shoot(tx, ty) {
   Body.setPosition(ballBody, { x: ballStart.x, y: ballStart.y });
   Body.setVelocity(ballBody,  { x: 0, y: 0 });
   Body.setStatic(ballBody, false);
-  Body.setVelocity(ballBody,  { x: (dx/d)*pwr, y: (dy/d)*pwr });
-  shots++; stopTmr = 0; trail = [];
+  Body.setVelocity(ballBody,  { x: (dx / d) * pwr, y: (dy / d) * pwr });
+
+  shots++;
+  stopTmr     = 0;
+  trail       = [];
+  bounceCount = 0;
+  comboMult   = 1;
+  ghostIdx    = 0;
+  currentRunRecord = [];
   gs = S.FLY;
 }
 
-// ── Win / Fail ─────────────────────────────────────────────
+// ── Win ────────────────────────────────────────────────────
 function win() {
+  if (gs === S.WIN) return;
   gs = S.WIN;
   burst(LEVELS[lvlIdx].goal[0], LEVELS[lvlIdx].goal[1], '#ffd700', 55);
   Body.setStatic(ballBody, true);
 
   levelStars = calcStars(shots, LEVELS[lvlIdx].shots);
-  levelScore = calcScore(levelStars, lvlIdx);
+  const base = LEVEL_BASE[lvlIdx];
+  levelScore = Math.round(base * levelStars * comboMult * (isDailyChallenge ? 2 : 1));
   totalScore += levelScore;
 
-  // Save best stars per level
   const prev = bestScores[lvlIdx] || 0;
   if (levelStars > prev) {
     bestScores[lvlIdx] = levelStars;
@@ -281,8 +502,19 @@ function win() {
     grandBest = totalScore;
     localStorage.setItem('bm_grand', grandBest);
   }
+
+  // Save ghost (subsample every 2nd frame)
+  if (currentRunRecord.length > 0) {
+    const sub = currentRunRecord.filter((_, i) => i % 2 === 0);
+    localStorage.setItem(`bm_ghost_${lvlIdx}`, JSON.stringify(sub));
+  }
+
+  if (isDailyChallenge) {
+    saveDailyComplete(levelScore);
+  }
 }
 
+// ── Stop check ─────────────────────────────────────────────
 function checkStop() {
   if (gs !== S.FLY || !ballBody) return;
   const v   = ballBody.velocity;
@@ -293,10 +525,30 @@ function checkStop() {
       Body.setStatic(ballBody, true);
       Body.setPosition(ballBody, { x: ballStart.x, y: ballStart.y });
       Body.setVelocity(ballBody,  { x: 0, y: 0 });
-      stopTmr = 0;
+      stopTmr     = 0;
+      bounceCount = 0;
+      comboMult   = 1;
       gs = shots >= LEVELS[lvlIdx].shots ? S.FAIL : S.AIM;
     }
   } else { stopTmr = 0; }
+}
+
+// ── Moving walls update ────────────────────────────────────
+function updateMovingWalls() {
+  for (const mw of movingWallDefs) {
+    mw.t += 0.02 * mw.speed;
+    const offset = Math.sin(mw.t) * mw.range / 2;
+    const nx = mw.axis === 'x' ? mw.ox + offset : mw.ox;
+    const ny = mw.axis === 'y' ? mw.oy + offset : mw.oy;
+    Body.setPosition(mw.body, { x: nx, y: ny });
+  }
+}
+
+// ── Portal cooldowns ───────────────────────────────────────
+function updatePortals() {
+  for (const pp of portalPairs) {
+    if (pp.cooldown > 0) pp.cooldown--;
+  }
 }
 
 // ── Particles ──────────────────────────────────────────────
@@ -306,51 +558,53 @@ function burst(x, y, col, n) {
     const s = Math.random() * 5 + 1;
     particles.push({
       x, y, col,
-      vx: Math.cos(a)*s, vy: Math.sin(a)*s,
-      r:  2 + Math.random()*3,
-      life: 1, dec: 0.022 + Math.random()*0.02
+      vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+      r:  2 + Math.random() * 3,
+      life: 1, dec: 0.022 + Math.random() * 0.02
     });
   }
 }
+
 function tickParticles() {
-  for (let i = particles.length-1; i >= 0; i--) {
+  for (let i = particles.length - 1; i >= 0; i--) {
     const p = particles[i];
     p.vy += 0.13; p.vx *= 0.96;
     p.x += p.vx; p.y += p.vy;
     p.life -= p.dec;
     if (p.life <= 0) particles.splice(i, 1);
   }
+  for (let i = floatTexts.length - 1; i >= 0; i--) {
+    const f = floatTexts[i];
+    f.y -= 1.2;
+    f.life -= 0.025;
+    if (f.life <= 0) floatTexts.splice(i, 1);
+  }
 }
 
 // ── Trajectory preview ─────────────────────────────────────
-// GR tuned to match matter-js gravity: scale:0.0018, dt:1000/60
-const TRAJ_GR = 0.50;
-
 function trajectory(sx, sy, vx, vy) {
   const pts = [];
-  const REST = 0.78, R = BALL_R;
   const L = LEVELS[lvlIdx];
   let cx = sx, cy = sy, cvx = vx, cvy = vy, bounces = 0;
 
-  for (let i = 0; i < 300; i++) {
+  for (let i = 0; i < 320; i++) {
     cvy += TRAJ_GR;
     cx += cvx; cy += cvy;
 
-    // Canvas edges
-    if (cx < R)       { cx = R;       cvx =  Math.abs(cvx)*REST; bounces++; }
-    if (cx > GW - R)  { cx = GW-R;    cvx = -Math.abs(cvx)*REST; bounces++; }
-    if (cy < R)       { cy = R;       cvy =  Math.abs(cvy)*REST; bounces++; }
+    if (cx < BALL_R)      { cx = BALL_R;      cvx =  Math.abs(cvx) * REST; bounces++; }
+    if (cx > GW - BALL_R) { cx = GW - BALL_R; cvx = -Math.abs(cvx) * REST; bounces++; }
+    if (cy < BALL_R)      { cy = BALL_R;       cvy =  Math.abs(cvy) * REST; bounces++; }
     if (cy > GH + 60) break;
 
-    // Axis-aligned walls only (skip angled — approximate is fine)
-    for (const [wx,wy,ww,wh,wa=0] of L.walls) {
+    // Axis-aligned static walls only
+    for (const [wx, wy, ww, wh, wa = 0] of (L.walls || [])) {
       if (Math.abs(wa) > 0.05) continue;
-      const l = wx - ww/2 - R, r = wx + ww/2 + R;
-      const t = wy - wh/2 - R, b = wy + wh/2 + R;
+      const l = wx - ww / 2 - BALL_R, r = wx + ww / 2 + BALL_R;
+      const t = wy - wh / 2 - BALL_R, b = wy + wh / 2 + BALL_R;
       if (cx > l && cx < r && cy > t && cy < b) {
         const px = cx - cvx, py = cy - cvy;
-        if (px <= l || px >= r) { cvx *= -REST; cx = cvx > 0 ? r+1 : l-1; }
-        else                    { cvy *= -REST; cy = cvy > 0 ? b+1 : t-1; }
+        if (px <= l || px >= r) { cvx *= -REST; cx = cvx > 0 ? r + 1 : l - 1; }
+        else                    { cvy *= -REST; cy = cvy > 0 ? b + 1 : t - 1; }
         bounces++;
       }
     }
@@ -364,44 +618,137 @@ function trajectory(sx, sy, vx, vy) {
 // ── Draw helpers ───────────────────────────────────────────
 function roundRect(x, y, w, h, r) {
   ct.beginPath();
-  ct.moveTo(x+r, y);
-  ct.arcTo(x+w, y,   x+w, y+h, r);
-  ct.arcTo(x+w, y+h, x,   y+h, r);
-  ct.arcTo(x,   y+h, x,   y,   r);
-  ct.arcTo(x,   y,   x+w, y,   r);
+  ct.moveTo(x + r, y);
+  ct.arcTo(x + w, y,     x + w, y + h, r);
+  ct.arcTo(x + w, y + h, x,     y + h, r);
+  ct.arcTo(x,     y + h, x,     y,     r);
+  ct.arcTo(x,     y,     x + w, y,     r);
   ct.closePath();
 }
 
-// ── Draw: background ───────────────────────────────────────
 function drawBG() {
   ct.fillStyle = '#080818';
   ct.fillRect(0, 0, GW, GH);
   ct.fillStyle = 'rgba(255,255,255,0.022)';
-  for (let x = 25; x < GW; x += 30)
+  for (let x = 25; x < GW; x += 30) {
     for (let y = 25; y < GH; y += 30) {
-      ct.beginPath(); ct.arc(x, y, 1, 0, Math.PI*2); ct.fill();
+      ct.beginPath(); ct.arc(x, y, 1, 0, Math.PI * 2); ct.fill();
     }
+  }
 }
 
-// ── Draw: walls ────────────────────────────────────────────
+// ── Draw: static walls ─────────────────────────────────────
 function drawWalls() {
-  for (const { body, isBorder } of wallBodies) {
+  for (const { body, isBorder, isMoving } of wallBodies) {
     if (isBorder) continue;
     const v = body.vertices;
     ct.save();
-    ct.shadowColor = '#4ecdc4';
-    ct.shadowBlur  = 14;
-    const g = ct.createLinearGradient(v[0].x, v[0].y, v[2].x, v[2].y);
-    g.addColorStop(0, '#4ecdc4');
-    g.addColorStop(1, '#1b8c84');
-    ct.fillStyle = g;
+    if (isMoving) {
+      ct.shadowColor = '#f59e0b';
+      ct.shadowBlur  = 14;
+      const g = ct.createLinearGradient(v[0].x, v[0].y, v[2].x, v[2].y);
+      g.addColorStop(0, '#f59e0b');
+      g.addColorStop(1, '#b45309');
+      ct.fillStyle = g;
+    } else {
+      ct.shadowColor = '#4ecdc4';
+      ct.shadowBlur  = 14;
+      const g = ct.createLinearGradient(v[0].x, v[0].y, v[2].x, v[2].y);
+      g.addColorStop(0, '#4ecdc4');
+      g.addColorStop(1, '#1b8c84');
+      ct.fillStyle = g;
+    }
     ct.beginPath();
     ct.moveTo(v[0].x, v[0].y);
     for (let i = 1; i < v.length; i++) ct.lineTo(v[i].x, v[i].y);
-    ct.closePath(); ct.fill();
+    ct.closePath();
+    ct.fill();
     ct.shadowBlur = 0;
     ct.restore();
   }
+}
+
+// ── Draw: bumpers ──────────────────────────────────────────
+function drawBumpers() {
+  const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 300);
+  for (const { body } of bumperBodies) {
+    const { x, y } = body.position;
+    const r = body.circleRadius;
+
+    const glow = ct.createRadialGradient(x, y, 0, x, y, r * 2.5);
+    glow.addColorStop(0, `rgba(168,85,247,${0.35 * pulse})`);
+    glow.addColorStop(1, 'rgba(168,85,247,0)');
+    ct.fillStyle = glow;
+    ct.beginPath(); ct.arc(x, y, r * 2.5, 0, Math.PI * 2); ct.fill();
+
+    ct.save();
+    ct.shadowColor = '#a855f7';
+    ct.shadowBlur  = 18 + 8 * pulse;
+    const ig = ct.createRadialGradient(x - r * 0.3, y - r * 0.3, 1, x, y, r);
+    ig.addColorStop(0, '#d8b4fe');
+    ig.addColorStop(0.6, '#a855f7');
+    ig.addColorStop(1,   '#7e22ce');
+    ct.fillStyle = ig;
+    ct.beginPath(); ct.arc(x, y, r, 0, Math.PI * 2); ct.fill();
+    ct.shadowBlur = 0;
+    ct.restore();
+  }
+}
+
+// ── Draw: portals ──────────────────────────────────────────
+function drawPortals() {
+  const t = Date.now() / 1000;
+  for (const pp of portalPairs) {
+    const { ox1, oy1, ox2, oy2, r } = pp;
+
+    // Dashed connecting line
+    ct.save();
+    ct.setLineDash([5, 7]);
+    ct.strokeStyle = 'rgba(150,120,255,0.3)';
+    ct.lineWidth   = 1.5;
+    ct.beginPath();
+    ct.moveTo(ox1, oy1);
+    ct.lineTo(ox2, oy2);
+    ct.stroke();
+    ct.setLineDash([]);
+    ct.restore();
+
+    // Portal A – purple
+    drawSinglePortal(ox1, oy1, r, 280, t);
+    // Portal B – blue
+    drawSinglePortal(ox2, oy2, r, 200, t);
+  }
+}
+
+function drawSinglePortal(x, y, r, hue, t) {
+  const pulse = 0.5 + 0.5 * Math.sin(t * 2.5);
+
+  const glow = ct.createRadialGradient(x, y, 0, x, y, r * 2.8);
+  glow.addColorStop(0, `hsla(${hue},80%,60%,${0.3 * pulse})`);
+  glow.addColorStop(1, `hsla(${hue},80%,60%,0)`);
+  ct.fillStyle = glow;
+  ct.beginPath(); ct.arc(x, y, r * 2.8, 0, Math.PI * 2); ct.fill();
+
+  // Inner glow
+  const ig = ct.createRadialGradient(x, y, 0, x, y, r);
+  ig.addColorStop(0,   `hsla(${hue},90%,85%,0.5)`);
+  ig.addColorStop(0.6, `hsla(${hue},80%,60%,0.3)`);
+  ig.addColorStop(1,   `hsla(${hue},80%,50%,0)`);
+  ct.fillStyle = ig;
+  ct.beginPath(); ct.arc(x, y, r, 0, Math.PI * 2); ct.fill();
+
+  // Animated ring
+  ct.save();
+  ct.shadowColor = `hsl(${hue},80%,60%)`;
+  ct.shadowBlur  = 10 + 8 * pulse;
+  ct.strokeStyle = `hsl(${hue},80%,65%)`;
+  ct.lineWidth   = 2.5;
+  ct.beginPath(); ct.arc(x, y, r + 2 * Math.sin(t * 3), 0, Math.PI * 2); ct.stroke();
+  ct.strokeStyle = `hsla(${hue},80%,80%,0.5)`;
+  ct.lineWidth   = 1;
+  ct.beginPath(); ct.arc(x, y, r * 0.6, 0, Math.PI * 2); ct.stroke();
+  ct.shadowBlur  = 0;
+  ct.restore();
 }
 
 // ── Draw: goal ─────────────────────────────────────────────
@@ -409,47 +756,24 @@ function drawGoal() {
   const [gx, gy, gr] = LEVELS[lvlIdx].goal;
   const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 420);
 
-  const pg = ct.createRadialGradient(gx,gy,0, gx,gy,gr*3.2);
-  pg.addColorStop(0, `rgba(255,215,0,${0.28*pulse})`);
+  const pg = ct.createRadialGradient(gx, gy, 0, gx, gy, gr * 3.2);
+  pg.addColorStop(0, `rgba(255,215,0,${0.28 * pulse})`);
   pg.addColorStop(1, 'rgba(255,215,0,0)');
   ct.fillStyle = pg;
-  ct.beginPath(); ct.arc(gx, gy, gr*3.2, 0, Math.PI*2); ct.fill();
+  ct.beginPath(); ct.arc(gx, gy, gr * 3.2, 0, Math.PI * 2); ct.fill();
 
   ct.shadowColor = '#ffd700'; ct.shadowBlur = 20;
   ct.strokeStyle = '#ffd700'; ct.lineWidth = 2.5;
   ct.fillStyle   = 'rgba(255,215,0,0.10)';
-  ct.beginPath(); ct.arc(gx, gy, gr, 0, Math.PI*2);
+  ct.beginPath(); ct.arc(gx, gy, gr, 0, Math.PI * 2);
   ct.fill(); ct.stroke();
   ct.shadowBlur = 0;
 
-  ct.fillStyle = '#ffd700';
-  ct.font = `${Math.round(gr * 1.15)}px serif`;
-  ct.textAlign = 'center'; ct.textBaseline = 'middle';
-  ct.fillText('★', gx, gy);
-}
-
-// ── Draw: ball ─────────────────────────────────────────────
-function drawBall() {
-  if (!ballBody) return;
-  const { x, y } = ballBody.position;
-
-  // Pulse ring when waiting to aim (tells player to drag the ball)
-  if (gs === S.AIM && !dragging) {
-    const pulse = 0.4 + 0.4 * Math.sin(Date.now() / 300);
-    const ringR = BALL_R + 10 + 6 * Math.sin(Date.now() / 400);
-    ct.strokeStyle = `rgba(255,107,53,${pulse})`;
-    ct.lineWidth = 2;
-    ct.beginPath(); ct.arc(x, y, ringR, 0, Math.PI*2); ct.stroke();
-  }
-
-  ct.shadowColor = '#ff6b35'; ct.shadowBlur = 20;
-  const g = ct.createRadialGradient(x-3,y-3,1, x,y,BALL_R);
-  g.addColorStop(0,   '#ffaa88');
-  g.addColorStop(0.5, '#ff6b35');
-  g.addColorStop(1,   '#c84400');
-  ct.fillStyle = g;
-  ct.beginPath(); ct.arc(x, y, BALL_R, 0, Math.PI*2); ct.fill();
-  ct.shadowBlur = 0;
+  ct.fillStyle   = '#ffd700';
+  ct.font        = `${Math.round(gr * 1.15)}px serif`;
+  ct.textAlign   = 'center';
+  ct.textBaseline = 'middle';
+  ct.fillText('\u2605', gx, gy);
 }
 
 // ── Draw: trail ────────────────────────────────────────────
@@ -457,15 +781,54 @@ function drawTrail() {
   for (let i = 1; i < trail.length; i++) {
     const a = (i / trail.length) * 0.45;
     ct.strokeStyle = `rgba(255,107,53,${a})`;
-    ct.lineWidth = 2;
+    ct.lineWidth   = 2;
     ct.beginPath();
-    ct.moveTo(trail[i-1].x, trail[i-1].y);
-    ct.lineTo(trail[i].x,   trail[i].y);
+    ct.moveTo(trail[i - 1].x, trail[i - 1].y);
+    ct.lineTo(trail[i].x,     trail[i].y);
     ct.stroke();
   }
 }
 
-// ── Draw: aim line ─────────────────────────────────────────
+// ── Draw: ghost ball ───────────────────────────────────────
+function drawGhost() {
+  if (ghostFrames.length === 0) return;
+  if (ghostIdx >= ghostFrames.length) return;
+  const gp = ghostFrames[ghostIdx];
+  if (!gp) return;
+  ct.save();
+  ct.globalAlpha  = 0.25;
+  ct.fillStyle    = '#60a5fa';
+  ct.shadowColor  = '#60a5fa';
+  ct.shadowBlur   = 10;
+  ct.beginPath(); ct.arc(gp[0], gp[1], BALL_R, 0, Math.PI * 2); ct.fill();
+  ct.restore();
+  ct.shadowBlur = 0;
+}
+
+// ── Draw: ball ─────────────────────────────────────────────
+function drawBall() {
+  if (!ballBody) return;
+  const { x, y } = ballBody.position;
+
+  if (gs === S.AIM && !dragging) {
+    const pulse = 0.4 + 0.4 * Math.sin(Date.now() / 300);
+    const ringR = BALL_R + 10 + 6 * Math.sin(Date.now() / 400);
+    ct.strokeStyle = `rgba(255,107,53,${pulse})`;
+    ct.lineWidth   = 2;
+    ct.beginPath(); ct.arc(x, y, ringR, 0, Math.PI * 2); ct.stroke();
+  }
+
+  ct.shadowColor = '#ff6b35'; ct.shadowBlur = 20;
+  const g = ct.createRadialGradient(x - 3, y - 3, 1, x, y, BALL_R);
+  g.addColorStop(0,   '#ffaa88');
+  g.addColorStop(0.5, '#ff6b35');
+  g.addColorStop(1,   '#c84400');
+  ct.fillStyle = g;
+  ct.beginPath(); ct.arc(x, y, BALL_R, 0, Math.PI * 2); ct.fill();
+  ct.shadowBlur = 0;
+}
+
+// ── Draw: aim ──────────────────────────────────────────────
 function drawAim() {
   if (!dragging || gs !== S.AIM) return;
   const dx = ballStart.x - mx, dy = ballStart.y - my;
@@ -473,18 +836,17 @@ function drawAim() {
   if (d < 10) return;
 
   const pwr = Math.min(d / 9, MAX_PWR);
-  const pts = trajectory(ballStart.x, ballStart.y, (dx/d)*pwr, (dy/d)*pwr);
+  const pts = trajectory(ballStart.x, ballStart.y, (dx / d) * pwr, (dy / d) * pwr);
 
   for (let i = 0; i < pts.length; i++) {
     const a = (1 - i / pts.length) * 0.85;
     const r = 3 * (1 - i / pts.length) + 1;
     ct.fillStyle = `rgba(255,107,53,${a})`;
-    ct.beginPath(); ct.arc(pts[i].x, pts[i].y, r, 0, Math.PI*2); ct.fill();
+    ct.beginPath(); ct.arc(pts[i].x, pts[i].y, r, 0, Math.PI * 2); ct.fill();
   }
 
-  // Power bar
   const pct = pwr / MAX_PWR;
-  const bw = 80, bh = 7, bx = ballStart.x - bw/2, by = ballStart.y + 24;
+  const bw = 80, bh = 7, bx = ballStart.x - bw / 2, by = ballStart.y + 24;
   ct.fillStyle = 'rgba(0,0,0,0.5)';
   roundRect(bx, by, bw, bh, 4); ct.fill();
   ct.fillStyle = pct < 0.4 ? '#4ecdc4' : pct < 0.75 ? '#ffd700' : '#ff4444';
@@ -495,200 +857,306 @@ function drawAim() {
 function drawParticles() {
   ct.save();
   for (const p of particles) {
-    ct.globalAlpha  = p.life;
-    ct.fillStyle    = p.col;
-    ct.shadowColor  = p.col;
-    ct.shadowBlur   = 8;
-    ct.beginPath(); ct.arc(p.x, p.y, p.r * p.life, 0, Math.PI*2); ct.fill();
+    ct.globalAlpha = p.life;
+    ct.fillStyle   = p.col;
+    ct.shadowColor = p.col;
+    ct.shadowBlur  = 8;
+    ct.beginPath(); ct.arc(p.x, p.y, p.r * p.life, 0, Math.PI * 2); ct.fill();
   }
   ct.restore();
   ct.shadowBlur = 0;
+}
+
+// ── Draw: float texts ──────────────────────────────────────
+function drawFloatTexts() {
+  ct.save();
+  for (const f of floatTexts) {
+    ct.globalAlpha = f.life;
+    ct.fillStyle   = f.col;
+    ct.font        = 'bold 13px system-ui';
+    ct.textAlign   = 'center';
+    ct.textBaseline = 'middle';
+    ct.fillText(f.text, f.x, f.y);
+  }
+  ct.restore();
 }
 
 // ── Draw: HUD ──────────────────────────────────────────────
 function drawHUD() {
   const L = LEVELS[lvlIdx];
 
-  // Level name
+  // Level name panel – top left
   ct.fillStyle = 'rgba(0,0,0,0.60)';
-  roundRect(10, 10, 215, 54, 10); ct.fill();
-  ct.fillStyle = '#fff';
-  ct.font = 'bold 13px system-ui'; ct.textAlign = 'left'; ct.textBaseline = 'top';
-  ct.fillText(`Lvl ${lvlIdx+1}  ${L.name}`, 20, 18);
-  ct.fillStyle = '#666';
-  ct.font = '11px system-ui';
-  ct.fillText(L.sub, 20, 38);
+  roundRect(10, 10, 195, 54, 10); ct.fill();
+  ct.fillStyle   = isDailyChallenge ? '#ffd700' : '#fff';
+  ct.font        = 'bold 13px system-ui';
+  ct.textAlign   = 'left';
+  ct.textBaseline = 'top';
+  ct.fillText(`Lvl ${lvlIdx + 1}  ${L.name}`, 20, 18);
+  ct.fillStyle   = isDailyChallenge ? '#f59e0b' : '#666';
+  ct.font        = '11px system-ui';
+  ct.fillText(isDailyChallenge ? '\u2605 DAILY CHALLENGE' : L.sub, 20, 37);
 
-  // Shot dots
+  // Score panel – top center
+  ct.fillStyle = 'rgba(0,0,0,0.60)';
+  roundRect(GW / 2 - 55, 10, 110, 54, 10); ct.fill();
+  ct.fillStyle   = '#ffd700';
+  ct.font        = 'bold 20px system-ui';
+  ct.textAlign   = 'center';
+  ct.textBaseline = 'top';
+  ct.fillText(totalScore.toLocaleString(), GW / 2, 16);
+  ct.fillStyle   = '#555';
+  ct.font        = '10px system-ui';
+  ct.fillText(`BEST ${grandBest.toLocaleString()}`, GW / 2, 40);
+
+  // Shot dots – top right
   const shotsLeft = L.shots - shots;
   ct.fillStyle = 'rgba(0,0,0,0.60)';
-  roundRect(GW-118, 10, 108, 54, 10); ct.fill();
-  ct.fillStyle = '#888';
-  ct.font = 'bold 10px system-ui'; ct.textAlign = 'right'; ct.textBaseline = 'top';
-  ct.fillText('SHOTS', GW-18, 18);
-  for (let i = 0; i < Math.min(L.shots, 6); i++) {
-    const dx = GW - 108 + i * 18;
-    ct.beginPath(); ct.arc(dx, 44, 6, 0, Math.PI*2);
+  roundRect(GW - 118, 10, 108, 54, 10); ct.fill();
+  ct.fillStyle   = '#888';
+  ct.font        = 'bold 10px system-ui';
+  ct.textAlign   = 'right';
+  ct.textBaseline = 'top';
+  ct.fillText('SHOTS', GW - 18, 18);
+  const dotsToShow = Math.min(L.shots, 6);
+  for (let i = 0; i < dotsToShow; i++) {
+    const dotX = GW - 108 + i * 18;
+    ct.beginPath(); ct.arc(dotX, 44, 6, 0, Math.PI * 2);
     if (i < shotsLeft) {
-      ct.fillStyle = '#ff6b35'; ct.shadowColor = '#ff6b35'; ct.shadowBlur = 10;
+      ct.fillStyle   = '#ff6b35';
+      ct.shadowColor = '#ff6b35';
+      ct.shadowBlur  = 10;
     } else {
-      ct.fillStyle = '#222'; ct.shadowBlur = 0;
+      ct.fillStyle  = '#222';
+      ct.shadowBlur = 0;
     }
     ct.fill();
   }
   ct.shadowBlur = 0;
 
-  // Total score center-top
-  ct.fillStyle = 'rgba(0,0,0,0.60)';
-  roundRect(GW/2 - 55, 10, 110, 54, 10); ct.fill();
-  ct.fillStyle = '#ffd700';
-  ct.font = 'bold 20px system-ui'; ct.textAlign = 'center'; ct.textBaseline = 'top';
-  ct.fillText(totalScore.toLocaleString(), GW/2, 16);
-  ct.fillStyle = '#555';
-  ct.font = '10px system-ui';
-  ct.fillText(`BEST ${grandBest.toLocaleString()}`, GW/2, 40);
-
+  // Hint
   if (gs === S.AIM && shots === 0) {
-    ct.fillStyle = 'rgba(255,255,255,0.45)';
-    ct.font = '13px system-ui'; ct.textAlign = 'center';
+    ct.fillStyle   = 'rgba(255,255,255,0.45)';
+    ct.font        = '13px system-ui';
+    ct.textAlign   = 'center';
     ct.textBaseline = 'bottom';
-    ct.fillText('Drag to aim  •  Release to shoot', GW/2, GH - 22);
+    ct.fillText('Drag the ball to aim \u2022 Release to shoot', GW / 2, GH - 22);
+  }
+
+  // Combo bar
+  if (gs === S.FLY && bounceCount > 0) {
+    const cw = 140, ch = 26, cx2 = GW / 2 - cw / 2, cy2 = GH - 44;
+    ct.fillStyle   = 'rgba(0,0,0,0.7)';
+    roundRect(cx2, cy2, cw, ch, 8); ct.fill();
+    ct.strokeStyle = '#a855f7';
+    ct.lineWidth   = 1.5;
+    ct.shadowColor = '#a855f7';
+    ct.shadowBlur  = 8;
+    roundRect(cx2, cy2, cw, ch, 8); ct.stroke();
+    ct.shadowBlur  = 0;
+    ct.fillStyle   = '#d8b4fe';
+    ct.font        = 'bold 13px system-ui';
+    ct.textAlign   = 'center';
+    ct.textBaseline = 'middle';
+    ct.fillText(`COMBO x${comboMult.toFixed(1)}`, GW / 2, cy2 + ch / 2);
   }
 }
 
-// ── Overlay card ───────────────────────────────────────────
-function drawCard(title, icon, btnText, accentColor, subText) {
-  ct.fillStyle = 'rgba(0,0,0,0.74)';
-  ct.fillRect(0, 0, GW, GH);
-
-  const cy = GH/2 - 130;
-  ct.fillStyle = '#0e0e28';
-  ct.strokeStyle = accentColor;
-  ct.lineWidth   = 2;
-  ct.shadowColor = accentColor; ct.shadowBlur = 30;
-  roundRect(35, cy, GW-70, 260, 18); ct.fill(); ct.stroke();
-  ct.shadowBlur = 0;
-
-  ct.font = '54px serif'; ct.textAlign = 'center'; ct.textBaseline = 'middle';
-  ct.fillText(icon, GW/2, cy + 62);
-
-  ct.fillStyle = accentColor;
-  ct.font = 'bold 23px system-ui';
-  ct.fillText(title, GW/2, cy + 122);
-
-  ct.fillStyle = '#777';
-  ct.font = '13px system-ui';
-  ct.fillText(subText, GW/2, cy + 152);
-
-  ct.fillStyle = accentColor;
-  ct.shadowColor = accentColor; ct.shadowBlur = 20;
-  roundRect(GW/2-88, cy+175, 176, 52, 12); ct.fill();
-  ct.shadowBlur = 0;
-  ct.fillStyle = accentColor === '#ffd700' ? '#000' : '#fff';
-  ct.font = 'bold 15px system-ui';
-  ct.fillText(btnText, GW/2, cy + 203);
-}
-
-// ── Win card with stars ────────────────────────────────────
+// ── Win Card ───────────────────────────────────────────────
 function drawWinCard(isLast) {
   ct.fillStyle = 'rgba(0,0,0,0.74)';
   ct.fillRect(0, 0, GW, GH);
 
-  const cy = GH/2 - 155;
-  ct.fillStyle = '#0e0e28';
-  ct.strokeStyle = '#ffd700'; ct.lineWidth = 2;
-  ct.shadowColor = '#ffd700'; ct.shadowBlur = 30;
-  roundRect(35, cy, GW-70, 310, 18); ct.fill(); ct.stroke();
+  const cy = GH / 2 - 160;
+  ct.fillStyle   = '#0e0e28';
+  ct.strokeStyle = '#ffd700';
+  ct.lineWidth   = 2;
+  ct.shadowColor = '#ffd700';
+  ct.shadowBlur  = 30;
+  roundRect(35, cy, GW - 70, 320, 18); ct.fill(); ct.stroke();
   ct.shadowBlur = 0;
 
-  // Title
-  ct.fillStyle = '#ffd700'; ct.font = 'bold 22px system-ui';
-  ct.textAlign = 'center'; ct.textBaseline = 'middle';
-  ct.fillText('Level Clear!', GW/2, cy + 38);
+  ct.fillStyle   = isDailyChallenge ? '#f59e0b' : '#ffd700';
+  ct.font        = 'bold 22px system-ui';
+  ct.textAlign   = 'center';
+  ct.textBaseline = 'middle';
+  ct.fillText(isDailyChallenge ? '\u2605 Daily Complete!' : 'Level Clear!', GW / 2, cy + 38);
 
   // Stars
-  const starY = cy + 95;
-  const starSize = 36;
-  const starGap  = 52;
   for (let i = 0; i < 3; i++) {
-    const sx = GW/2 + (i - 1) * starGap;
+    const sx = GW / 2 + (i - 1) * 52;
     const filled = i < levelStars;
-    ct.font = `${starSize}px serif`;
-    ct.textAlign = 'center'; ct.textBaseline = 'middle';
-    if (filled) {
-      ct.shadowColor = '#ffd700'; ct.shadowBlur = 20;
-      ct.fillStyle = '#ffd700';
-    } else {
-      ct.fillStyle = '#333'; ct.shadowBlur = 0;
-    }
-    ct.fillText('★', sx, starY);
+    ct.font = '36px serif';
+    ct.textAlign   = 'center';
+    ct.textBaseline = 'middle';
+    if (filled) { ct.shadowColor = '#ffd700'; ct.shadowBlur = 20; ct.fillStyle = '#ffd700'; }
+    else        { ct.fillStyle = '#2a2a3a';   ct.shadowBlur = 0; }
+    ct.fillText('\u2605', sx, cy + 95);
   }
   ct.shadowBlur = 0;
 
   // Points earned
-  ct.fillStyle = '#fff'; ct.font = 'bold 28px system-ui';
-  ct.textAlign = 'center'; ct.textBaseline = 'middle';
-  ct.fillText(`+${levelScore}`, GW/2, cy + 148);
+  ct.fillStyle   = '#fff';
+  ct.font        = 'bold 30px system-ui';
+  ct.textAlign   = 'center';
+  ct.textBaseline = 'middle';
+  ct.fillText(`+${levelScore.toLocaleString()}`, GW / 2, cy + 152);
 
-  ct.fillStyle = '#555'; ct.font = '12px system-ui';
-  ct.fillText(`${shots} shot${shots !== 1 ? 's' : ''} used  •  Total: ${totalScore.toLocaleString()}`, GW/2, cy + 175);
+  // Combo note
+  if (comboMult > 1.05) {
+    ct.fillStyle   = '#c084fc';
+    ct.font        = '12px system-ui';
+    ct.textAlign   = 'center';
+    ct.textBaseline = 'middle';
+    ct.fillText(`Combo x${comboMult.toFixed(1)} applied!`, GW / 2, cy + 178);
+  }
+
+  // Shots + total
+  ct.fillStyle   = '#555';
+  ct.font        = '12px system-ui';
+  ct.textAlign   = 'center';
+  ct.textBaseline = 'middle';
+  ct.fillText(`${shots} shot${shots !== 1 ? 's' : ''} used  \u2022  Total: ${totalScore.toLocaleString()}`, GW / 2, cy + 200);
 
   // Button
-  const btnColor = '#ffd700';
-  ct.fillStyle = btnColor; ct.shadowColor = btnColor; ct.shadowBlur = 20;
-  roundRect(GW/2 - 88, cy + 200, 176, 52, 12); ct.fill();
-  ct.shadowBlur = 0;
-  ct.fillStyle = '#000'; ct.font = 'bold 15px system-ui';
-  ct.fillText(isLast ? '↺ Play Again' : 'Next Level →', GW/2, cy + 228);
+  ct.fillStyle   = '#ffd700';
+  ct.shadowColor = '#ffd700';
+  ct.shadowBlur  = 20;
+  roundRect(GW / 2 - 88, cy + 220, 176, 52, 12); ct.fill();
+  ct.shadowBlur  = 0;
+  ct.fillStyle   = '#000';
+  ct.font        = 'bold 15px system-ui';
+  ct.textAlign   = 'center';
+  ct.textBaseline = 'middle';
+  ct.fillText(isLast ? '\u21BA Play Again' : 'Next Level \u2192', GW / 2, cy + 248);
 }
 
-// ── Menu screen ────────────────────────────────────────────
+// ── Fail Card ──────────────────────────────────────────────
+function drawFailCard() {
+  ct.fillStyle = 'rgba(0,0,0,0.74)';
+  ct.fillRect(0, 0, GW, GH);
+
+  const cy = GH / 2 - 130;
+  ct.fillStyle   = '#0e0e28';
+  ct.strokeStyle = '#ff4444';
+  ct.lineWidth   = 2;
+  ct.shadowColor = '#ff4444';
+  ct.shadowBlur  = 30;
+  roundRect(35, cy, GW - 70, 260, 18); ct.fill(); ct.stroke();
+  ct.shadowBlur = 0;
+
+  ct.font        = '54px serif';
+  ct.textAlign   = 'center';
+  ct.textBaseline = 'middle';
+  ct.fillText('\uD83D\uDC80', GW / 2, cy + 62);
+
+  ct.fillStyle   = '#ff4444';
+  ct.font        = 'bold 23px system-ui';
+  ct.textAlign   = 'center';
+  ct.textBaseline = 'middle';
+  ct.fillText('Out of Shots!', GW / 2, cy + 122);
+
+  ct.fillStyle   = '#666';
+  ct.font        = '13px system-ui';
+  ct.fillText('So close... try again', GW / 2, cy + 152);
+
+  ct.fillStyle   = '#ff4444';
+  ct.shadowColor = '#ff4444';
+  ct.shadowBlur  = 20;
+  roundRect(GW / 2 - 88, cy + 175, 176, 52, 12); ct.fill();
+  ct.shadowBlur  = 0;
+  ct.fillStyle   = '#fff';
+  ct.font        = 'bold 15px system-ui';
+  ct.textAlign   = 'center';
+  ct.textBaseline = 'middle';
+  ct.fillText('\u21BA Try Again', GW / 2, cy + 203);
+}
+
+// ── Menu ───────────────────────────────────────────────────
 function drawMenu() {
   drawBG();
 
   // Hero ball
-  ct.shadowColor = '#ff6b35'; ct.shadowBlur = 45;
-  const g = ct.createRadialGradient(GW/2-10, 138, 6, GW/2, 150, 52);
-  g.addColorStop(0, '#ffaa88'); g.addColorStop(0.5, '#ff6b35'); g.addColorStop(1, '#c84400');
-  ct.fillStyle = g;
-  ct.beginPath(); ct.arc(GW/2, 150, 52, 0, Math.PI*2); ct.fill();
+  ct.shadowColor = '#ff6b35';
+  ct.shadowBlur  = 45;
+  const hg = ct.createRadialGradient(GW / 2 - 10, 53, 6, GW / 2, 65, 38);
+  hg.addColorStop(0,   '#ffaa88');
+  hg.addColorStop(0.5, '#ff6b35');
+  hg.addColorStop(1,   '#c84400');
+  ct.fillStyle = hg;
+  ct.beginPath(); ct.arc(GW / 2, 65, 38, 0, Math.PI * 2); ct.fill();
   ct.shadowBlur = 0;
 
-  ct.fillStyle = '#fff'; ct.font = 'bold 33px system-ui';
-  ct.textAlign = 'center'; ct.textBaseline = 'top';
-  ct.fillText('BOUNCE MAZE', GW/2, 220);
-  ct.fillStyle = '#555'; ct.font = '13px system-ui';
-  ct.fillText('Physics puzzle  •  Can you rage quit?', GW/2, 260);
+  // Title
+  ct.fillStyle   = '#fff';
+  ct.font        = 'bold 28px system-ui';
+  ct.textAlign   = 'center';
+  ct.textBaseline = 'top';
+  ct.fillText('BOUNCE MAZE', GW / 2, 120);
 
+  // Subtitle
+  ct.fillStyle = '#555';
+  ct.font      = '12px system-ui';
+  ct.fillText(`Best: ${grandBest.toLocaleString()} \u2022 Physics puzzle`, GW / 2, 146);
+
+  // Daily challenge button
+  const daily    = getDailyInfo();
+  const dailyDone = daily.done;
+  ct.fillStyle   = 'rgba(0,0,0,0.5)';
+  ct.strokeStyle = dailyDone ? '#555' : '#ffd700';
+  ct.lineWidth   = 2;
+  if (!dailyDone) { ct.shadowColor = '#ffd700'; ct.shadowBlur = 14; }
+  roundRect(50, 158, GW - 100, 44, 10); ct.fill(); ct.stroke();
+  ct.shadowBlur  = 0;
+  ct.fillStyle   = dailyDone ? '#555' : '#ffd700';
+  ct.font        = 'bold 14px system-ui';
+  ct.textAlign   = 'center';
+  ct.textBaseline = 'middle';
+  ct.fillText(dailyDone ? '\u2605 Daily Done' : '\u2605 Daily Challenge', GW / 2, 158 + 22);
+
+  // Level rows
   for (let i = 0; i < LEVELS.length; i++) {
     const L   = LEVELS[i];
-    const by  = 300 + i * 68;
+    const by  = 210 + i * 38;
     const rage = i === LEVELS.length - 1;
 
     ct.fillStyle   = rage ? 'rgba(255,68,68,0.10)' : 'rgba(78,205,196,0.07)';
     ct.strokeStyle = rage ? '#ff4444' : '#4ecdc4';
-    ct.lineWidth   = 1.5;
-    ct.shadowColor = ct.strokeStyle; ct.shadowBlur = 8;
-    roundRect(35, by, GW-70, 54, 12); ct.fill(); ct.stroke();
-    ct.shadowBlur = 0;
+    ct.lineWidth   = 1.2;
+    ct.shadowColor = ct.strokeStyle;
+    ct.shadowBlur  = 6;
+    roundRect(30, by, GW - 60, 34, 8); ct.fill(); ct.stroke();
+    ct.shadowBlur  = 0;
 
-    ct.fillStyle = rage ? '#ff4444' : '#4ecdc4';
-    ct.font = 'bold 13px system-ui'; ct.textAlign = 'left'; ct.textBaseline = 'middle';
-    ct.fillText(`${i+1}.  ${L.name}`, 55, by + 20);
+    // Level name
+    ct.fillStyle   = rage ? '#ff4444' : '#4ecdc4';
+    ct.font        = 'bold 12px system-ui';
+    ct.textAlign   = 'left';
+    ct.textBaseline = 'top';
+    ct.fillText(`${i + 1}. ${L.name}`, 46, by + 5);
 
-    ct.fillStyle = '#555'; ct.font = '11px system-ui';
-    ct.fillText(L.sub, 55, by + 38);
+    // Sub
+    ct.fillStyle   = '#555';
+    ct.font        = '10px system-ui';
+    ct.textBaseline = 'top';
+    ct.fillText(L.sub, 46, by + 20);
 
-    // Stars earned
+    // Stars right
     const earned = bestScores[i] || 0;
-    ct.textAlign = 'right'; ct.textBaseline = 'middle';
-    ct.font = '14px serif';
+    ct.font        = '13px serif';
+    ct.textAlign   = 'right';
+    ct.textBaseline = 'top';
     for (let s = 0; s < 3; s++) {
       ct.fillStyle = s < earned ? '#ffd700' : '#2a2a3a';
-      ct.fillText('★', GW - 55 + s * 16, by + 20);
+      ct.fillText('\u2605', GW - 50 + s * 14, by + 4);
     }
-    ct.fillStyle = '#444'; ct.font = '11px system-ui';
-    ct.fillText(`${L.shots} shot${L.shots > 1 ? 's' : ''}`, GW - 55 + 44, by + 38);
+
+    // Shots right bottom
+    ct.fillStyle   = '#444';
+    ct.font        = '10px system-ui';
+    ct.textAlign   = 'right';
+    ct.textBaseline = 'bottom';
+    ct.fillText(`${L.shots} shot${L.shots > 1 ? 's' : ''}`, GW - 36, by + 32);
   }
 }
 
@@ -701,7 +1169,7 @@ function evPos(e) {
 
 function goFullscreen() {
   const el = document.documentElement;
-  if (el.requestFullscreen)            el.requestFullscreen();
+  if (el.requestFullscreen)            el.requestFullscreen().catch(() => {});
   else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
   else if (el.mozRequestFullScreen)    el.mozRequestFullScreen();
 }
@@ -712,36 +1180,57 @@ function onDown(e) {
   const p = evPos(e); mx = p.x; my = p.y;
 
   if (gs === S.MENU) {
+    // Daily challenge button hit test
+    const daily = getDailyInfo();
+    if (mx > 50 && mx < GW - 50 && my > 158 && my < 202) {
+      if (!daily.done) {
+        isDailyChallenge = true;
+        lvlIdx = daily.lvl;
+        totalScore = 0;
+        loadLevel(daily.lvl, true);
+      }
+      return;
+    }
+    // Level rows
     for (let i = 0; i < LEVELS.length; i++) {
-      const by = 300 + i * 68;
-      if (mx > 35 && mx < GW-35 && my > by && my < by+54) {
+      const by = 210 + i * 38;
+      if (mx > 30 && mx < GW - 30 && my > by && my < by + 34) {
+        isDailyChallenge = false;
         lvlIdx = i;
-        if (i === 0) totalScore = 0; // fresh run from level 1
-        loadLevel(i);
+        if (i === 0) totalScore = 0;
+        loadLevel(i, false);
+        return;
       }
     }
     return;
   }
 
-  const cardY = GH/2 - 155;
+  // Win card button
   if (gs === S.WIN) {
-    if (my > cardY+200 && my < cardY+252 && mx > GW/2-88 && mx < GW/2+88) {
-      if (lvlIdx >= LEVELS.length - 1) { gs = S.MENU; totalScore = 0; }
-      else loadLevel(++lvlIdx);
+    const cy = GH / 2 - 160;
+    if (my > cy + 220 && my < cy + 272 && mx > GW / 2 - 88 && mx < GW / 2 + 88) {
+      if (lvlIdx >= LEVELS.length - 1 || isDailyChallenge) {
+        gs = S.MENU; totalScore = 0; isDailyChallenge = false;
+      } else {
+        loadLevel(++lvlIdx, false);
+      }
     }
     return;
   }
+
+  // Fail card button
   if (gs === S.FAIL) {
-    if (my > cardY+175 && my < cardY+227 && mx > GW/2-88 && mx < GW/2+88) {
-      totalScore = Math.max(0, totalScore - levelScore); // refund last level score on retry
-      loadLevel(lvlIdx);
+    const cy = GH / 2 - 130;
+    if (my > cy + 175 && my < cy + 227 && mx > GW / 2 - 88 && mx < GW / 2 + 88) {
+      totalScore = Math.max(0, totalScore - levelScore);
+      loadLevel(lvlIdx, isDailyChallenge);
     }
     return;
   }
+
   if (gs === S.AIM) {
-    // Only start drag if touching near the ball
-    const distToBall = Math.hypot(mx - ballStart.x, my - ballStart.y);
-    if (distToBall < 60) dragging = true;
+    const dist = Math.hypot(mx - ballStart.x, my - ballStart.y);
+    if (dist < 60) dragging = true;
   }
 }
 
@@ -770,31 +1259,39 @@ function loop() {
   if (gs === S.MENU) { drawMenu(); return; }
 
   if (gs === S.FLY) {
-    Engine.update(engine, 1000/60);
+    updateMovingWalls();
+    Engine.update(engine, 1000 / 60);
+    updatePortals();
+
     if (ballBody) {
       const { x, y } = ballBody.position;
       trail.push({ x, y });
       if (trail.length > 38) trail.shift();
+      currentRunRecord.push([x, y]);
+      if (ghostIdx < ghostFrames.length) ghostIdx++;
     }
     checkStop();
+  } else if (gs === S.AIM) {
+    updateMovingWalls();
+    Engine.update(engine, 1000 / 60);
+    updatePortals();
   }
 
   drawBG();
   drawTrail();
+  drawGhost();
   drawWalls();
+  drawBumpers();
+  drawPortals();
   drawGoal();
   drawBall();
   drawAim();
   drawParticles();
+  drawFloatTexts();
   drawHUD();
 
-  if (gs === S.WIN) {
-    const isLast = lvlIdx >= LEVELS.length - 1;
-    drawWinCard(isLast);
-  }
-  if (gs === S.FAIL) {
-    drawCard('Out of Shots!', '💀', '↺ Try Again', '#ff4444', 'So close... try again');
-  }
+  if (gs === S.WIN)  { drawWinCard(lvlIdx >= LEVELS.length - 1); }
+  if (gs === S.FAIL) { drawFailCard(); }
 }
 
 // ── Start ──────────────────────────────────────────────────
