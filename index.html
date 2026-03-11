@@ -32,13 +32,13 @@ const GW = 400, GH = 680;
 let SCALE = 1;
 
 (function resize() {
-  SCALE = Math.min(window.innerWidth / GW, window.innerHeight / GH, 2);
+  SCALE = Math.min(window.innerWidth / GW, window.innerHeight / GH);
   C.width  = GW; C.height = GH;
   C.style.width  = GW * SCALE + 'px';
   C.style.height = GH * SCALE + 'px';
 })();
 window.addEventListener('resize', () => {
-  SCALE = Math.min(window.innerWidth / GW, window.innerHeight / GH, 2);
+  SCALE = Math.min(window.innerWidth / GW, window.innerHeight / GH);
   C.style.width  = GW * SCALE + 'px';
   C.style.height = GH * SCALE + 'px';
 });
