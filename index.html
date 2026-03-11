@@ -574,8 +574,16 @@ function evPos(e) {
   return { x: (t.clientX - r.left) / SCALE, y: (t.clientY - r.top) / SCALE };
 }
 
+function goFullscreen() {
+  const el = document.documentElement;
+  if (el.requestFullscreen)            el.requestFullscreen();
+  else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  else if (el.mozRequestFullScreen)    el.mozRequestFullScreen();
+}
+
 function onDown(e) {
   e.preventDefault();
+  goFullscreen();
   const p = evPos(e); mx = p.x; my = p.y;
 
   if (gs === S.MENU) {
