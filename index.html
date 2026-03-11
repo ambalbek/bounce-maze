@@ -71,13 +71,21 @@ let ballStart = { x: 0, y: 0 };
 // goal:  [gx, gy, radius]
 const LEVELS = [
   {
+    name: 'First Shot',
+    sub:  'Aim at the star — no walls',
+    shots: 6,
+    ball: [100, 580],
+    goal: [300, 130, 30],  // huge goal, clear shot
+    walls: []
+  },
+  {
     name: 'Warm Up',
-    sub:  'Feel the bounce',
+    sub:  'Bounce off the right wall',
     shots: 5,
-    ball: [70, 590],
-    goal: [330, 110, 22],
+    ball: [70, 560],
+    goal: [330, 160, 25],
     walls: [
-      [215, 390, 190, 14, -0.28],
+      [340, 380, 14, 280], // right-side vertical wall to bounce off
     ]
   },
   {
@@ -85,7 +93,7 @@ const LEVELS = [
     sub:  'Two bounces needed',
     shots: 4,
     ball: [55, 600],
-    goal: [345, 100, 19],
+    goal: [345, 100, 20],
     walls: [
       [240, 490, 230, 13],
       [120, 310, 180, 13],
@@ -263,8 +271,8 @@ function tickParticles() {
 }
 
 // ── Trajectory preview ─────────────────────────────────────
-// GR is tuned to approximate matter-js gravity visually
-const TRAJ_GR = 0.40;
+// GR tuned to match matter-js gravity: scale:0.0018, dt:1000/60
+const TRAJ_GR = 0.50;
 
 function trajectory(sx, sy, vx, vy) {
   const pts = [];
