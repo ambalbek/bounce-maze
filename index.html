@@ -55,16 +55,36 @@ function mkEngine() {
 
 // ── State ──────────────────────────────────────────────────
 const S = { MENU: 0, AIM: 1, FLY: 2, WIN: 3, FAIL: 4 };
-let gs       = S.MENU;
-let lvlIdx   = 0;
-let shots    = 0;
-let stopTmr  = 0;
+let gs        = S.MENU;
+let lvlIdx    = 0;
+let shots     = 0;
+let stopTmr   = 0;
 let particles = [];
-let trail    = [];
-let ballBody = null;
-let wallBodies = [];   // { body, isBorder }
+let trail     = [];
+let ballBody  = null;
+let wallBodies = [];
 let mx = GW/2, my = GH/2, dragging = false;
 let ballStart = { x: 0, y: 0 };
+
+// ── Scoring ────────────────────────────────────────────────
+let totalScore  = 0;
+let levelScore  = 0;
+let levelStars  = 0;
+let bestScores  = JSON.parse(localStorage.getItem('bm_best') || '{}'); // { lvlIdx: stars }
+let grandBest   = parseInt(localStorage.getItem('bm_grand') || '0');
+
+const LEVEL_BASE = [100, 150, 200, 300, 450, 600, 1000]; // points per level
+
+function calcStars(shotsUsed, maxShots) {
+  const pct = shotsUsed / maxShots;
+  if (pct <= 0.34) return 3;
+  if (pct <= 0.67) return 2;
+  return 1;
+}
+
+function calcScore(stars, lvl) {
+  return LEVEL_BASE[lvl] * stars;
+}
 
 // ── Levels ─────────────────────────────────────────────────
 // walls: [cx, cy, w, h, angle=0]
@@ -246,6 +266,21 @@ function win() {
   gs = S.WIN;
   burst(LEVELS[lvlIdx].goal[0], LEVELS[lvlIdx].goal[1], '#ffd700', 55);
   Body.setStatic(ballBody, true);
+
+  levelStars = calcStars(shots, LEVELS[lvlIdx].shots);
+  levelScore = calcScore(levelStars, lvlIdx);
+  totalScore += levelScore;
+
+  // Save best stars per level
+  const prev = bestScores[lvlIdx] || 0;
+  if (levelStars > prev) {
+    bestScores[lvlIdx] = levelStars;
+    localStorage.setItem('bm_best', JSON.stringify(bestScores));
+  }
+  if (totalScore > grandBest) {
+    grandBest = totalScore;
+    localStorage.setItem('bm_grand', grandBest);
+  }
 }
 
 function checkStop() {
@@ -503,6 +538,16 @@ function drawHUD() {
   }
   ct.shadowBlur = 0;
 
+  // Total score center-top
+  ct.fillStyle = 'rgba(0,0,0,0.60)';
+  roundRect(GW/2 - 55, 10, 110, 54, 10); ct.fill();
+  ct.fillStyle = '#ffd700';
+  ct.font = 'bold 20px system-ui'; ct.textAlign = 'center'; ct.textBaseline = 'top';
+  ct.fillText(totalScore.toLocaleString(), GW/2, 16);
+  ct.fillStyle = '#555';
+  ct.font = '10px system-ui';
+  ct.fillText(`BEST ${grandBest.toLocaleString()}`, GW/2, 40);
+
   if (gs === S.AIM && shots === 0) {
     ct.fillStyle = 'rgba(255,255,255,0.45)';
     ct.font = '13px system-ui'; ct.textAlign = 'center';
@@ -544,6 +589,59 @@ function drawCard(title, icon, btnText, accentColor, subText) {
   ct.fillText(btnText, GW/2, cy + 203);
 }
 
+// ── Win card with stars ────────────────────────────────────
+function drawWinCard(isLast) {
+  ct.fillStyle = 'rgba(0,0,0,0.74)';
+  ct.fillRect(0, 0, GW, GH);
+
+  const cy = GH/2 - 155;
+  ct.fillStyle = '#0e0e28';
+  ct.strokeStyle = '#ffd700'; ct.lineWidth = 2;
+  ct.shadowColor = '#ffd700'; ct.shadowBlur = 30;
+  roundRect(35, cy, GW-70, 310, 18); ct.fill(); ct.stroke();
+  ct.shadowBlur = 0;
+
+  // Title
+  ct.fillStyle = '#ffd700'; ct.font = 'bold 22px system-ui';
+  ct.textAlign = 'center'; ct.textBaseline = 'middle';
+  ct.fillText('Level Clear!', GW/2, cy + 38);
+
+  // Stars
+  const starY = cy + 95;
+  const starSize = 36;
+  const starGap  = 52;
+  for (let i = 0; i < 3; i++) {
+    const sx = GW/2 + (i - 1) * starGap;
+    const filled = i < levelStars;
+    ct.font = `${starSize}px serif`;
+    ct.textAlign = 'center'; ct.textBaseline = 'middle';
+    if (filled) {
+      ct.shadowColor = '#ffd700'; ct.shadowBlur = 20;
+      ct.fillStyle = '#ffd700';
+    } else {
+      ct.fillStyle = '#333'; ct.shadowBlur = 0;
+    }
+    ct.fillText('★', sx, starY);
+  }
+  ct.shadowBlur = 0;
+
+  // Points earned
+  ct.fillStyle = '#fff'; ct.font = 'bold 28px system-ui';
+  ct.textAlign = 'center'; ct.textBaseline = 'middle';
+  ct.fillText(`+${levelScore}`, GW/2, cy + 148);
+
+  ct.fillStyle = '#555'; ct.font = '12px system-ui';
+  ct.fillText(`${shots} shot${shots !== 1 ? 's' : ''} used  •  Total: ${totalScore.toLocaleString()}`, GW/2, cy + 175);
+
+  // Button
+  const btnColor = '#ffd700';
+  ct.fillStyle = btnColor; ct.shadowColor = btnColor; ct.shadowBlur = 20;
+  roundRect(GW/2 - 88, cy + 200, 176, 52, 12); ct.fill();
+  ct.shadowBlur = 0;
+  ct.fillStyle = '#000'; ct.font = 'bold 15px system-ui';
+  ct.fillText(isLast ? '↺ Play Again' : 'Next Level →', GW/2, cy + 228);
+}
+
 // ── Menu screen ────────────────────────────────────────────
 function drawMenu() {
   drawBG();
@@ -581,8 +679,16 @@ function drawMenu() {
     ct.fillStyle = '#555'; ct.font = '11px system-ui';
     ct.fillText(L.sub, 55, by + 38);
 
-    ct.fillStyle = '#555'; ct.textAlign = 'right'; ct.font = '12px system-ui';
-    ct.fillText(`${L.shots} shot${L.shots > 1 ? 's' : ''}`, GW - 55, by + 27);
+    // Stars earned
+    const earned = bestScores[i] || 0;
+    ct.textAlign = 'right'; ct.textBaseline = 'middle';
+    ct.font = '14px serif';
+    for (let s = 0; s < 3; s++) {
+      ct.fillStyle = s < earned ? '#ffd700' : '#2a2a3a';
+      ct.fillText('★', GW - 55 + s * 16, by + 20);
+    }
+    ct.fillStyle = '#444'; ct.font = '11px system-ui';
+    ct.fillText(`${L.shots} shot${L.shots > 1 ? 's' : ''}`, GW - 55 + 44, by + 38);
   }
 }
 
@@ -609,23 +715,27 @@ function onDown(e) {
     for (let i = 0; i < LEVELS.length; i++) {
       const by = 300 + i * 68;
       if (mx > 35 && mx < GW-35 && my > by && my < by+54) {
-        lvlIdx = i; loadLevel(i);
+        lvlIdx = i;
+        if (i === 0) totalScore = 0; // fresh run from level 1
+        loadLevel(i);
       }
     }
     return;
   }
 
-  const cardY = GH/2 - 130;
+  const cardY = GH/2 - 155;
   if (gs === S.WIN) {
-    if (my > cardY+175 && my < cardY+227 && mx > GW/2-88 && mx < GW/2+88) {
-      if (lvlIdx >= LEVELS.length - 1) gs = S.MENU;
+    if (my > cardY+200 && my < cardY+252 && mx > GW/2-88 && mx < GW/2+88) {
+      if (lvlIdx >= LEVELS.length - 1) { gs = S.MENU; totalScore = 0; }
       else loadLevel(++lvlIdx);
     }
     return;
   }
   if (gs === S.FAIL) {
-    if (my > cardY+175 && my < cardY+227 && mx > GW/2-88 && mx < GW/2+88)
+    if (my > cardY+175 && my < cardY+227 && mx > GW/2-88 && mx < GW/2+88) {
+      totalScore = Math.max(0, totalScore - levelScore); // refund last level score on retry
       loadLevel(lvlIdx);
+    }
     return;
   }
   if (gs === S.AIM) {
@@ -680,12 +790,7 @@ function loop() {
 
   if (gs === S.WIN) {
     const isLast = lvlIdx >= LEVELS.length - 1;
-    drawCard(
-      'Level Clear!', '🎉',
-      isLast ? '↺ Play Again' : 'Next Level →',
-      '#ffd700',
-      `Solved in ${shots} shot${shots !== 1 ? 's' : ''}`
-    );
+    drawWinCard(isLast);
   }
   if (gs === S.FAIL) {
     drawCard('Out of Shots!', '💀', '↺ Try Again', '#ff4444', 'So close... try again');
