@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Bounce Maze ⚽</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #050510;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  overflow: hidden;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+canvas { display: block; touch-action: none; cursor: crosshair; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script>
+// ============================================================
+//  BOUNCE MAZE  ⚽  Physics Puzzle
+// ============================================================
+
+const C  = document.getElementById('c');
+const ct = C.getContext('2d');
+const GW = 400, GH = 680;
+let SCALE = 1;
+
+(function resize() {
+  SCALE = Math.min(window.innerWidth / GW, window.innerHeight / GH, 2);
+  C.width  = GW; C.height = GH;
+  C.style.width  = GW * SCALE + 'px';
+  C.style.height = GH * SCALE + 'px';
+})();
+window.addEventListener('resize', () => {
+  SCALE = Math.min(window.innerWidth / GW, window.innerHeight / GH, 2);
+  C.style.width  = GW * SCALE + 'px';
+  C.style.height = GH * SCALE + 'px';
+});
+
+// ── Matter.js ──────────────────────────────────────────────
+const { Engine, Bodies, Body, World, Events } = Matter;
+let engine, world;
+
+function mkEngine() {
+  if (engine) World.clear(world, false);
+  engine = Engine.create({ gravity: { x: 0, y: 1, scale: 0.0018 } });
+  world  = engine.world;
+}
+
+// ── State ──────────────────────────────────────────────────
+const S = { MENU: 0, AIM: 1, FLY: 2, WIN: 3, FAIL: 4 };
+let gs       = S.MENU;
+let lvlIdx   = 0;
+let shots    = 0;
+let stopTmr  = 0;
+let particles = [];
+let trail    = [];
+let ballBody = null;
+let wallBodies = [];   // { body, isBorder }
+let mx = GW/2, my = GH/2, dragging = false;
+let ballStart = { x: 0, y: 0 };
+
+// ── Levels ─────────────────────────────────────────────────
+// walls: [cx, cy, w, h, angle=0]
+// goal:  [gx, gy, radius]
+const LEVELS = [
+  {
+    name: 'Warm Up',
+    sub:  'Feel the bounce',
+    shots: 5,
+    ball: [70, 590],
+    goal: [330, 110, 22],
+    walls: [
+      [215, 390, 190, 14, -0.28],
+    ]
+  },
+  {
+    name: 'Two Step',
+    sub:  'Two bounces needed',
+    shots: 4,
+    ball: [55, 600],
+    goal: [345, 100, 19],
+    walls: [
+      [240, 490, 230, 13],
+      [120, 310, 180, 13],
+    ]
+  },
+  {
+    name: 'Zigzag',
+    sub:  'Precision required',
+    shots: 3,
+    ball: [50, 620],
+    goal: [355, 75, 17],
+    walls: [
+      [255, 520, 255, 12,  0.15],
+      [ 95, 405, 205, 12, -0.15],
+      [300, 275, 225, 12,  0.10],
+      [ 95, 160, 195, 12],
+    ]
+  },
+  {
+    name: 'The Box',
+    sub:  "There's a way out...",
+    shots: 2,
+    ball: [200, 610],
+    goal: [48, 78, 15],
+    walls: [
+      [255, 445, 205, 12],
+      [358, 363, 12,  164],
+      [255, 280, 205, 12],
+      [ 88, 395, 12,  330],
+    ]
+  },
+  {
+    name: '☠ RAGE MODE ☠',
+    sub:  '1 shot. Tiny goal. RIP.',
+    shots: 1,
+    ball: [45, 640],
+    goal: [368, 48, 12],
+    walls: [
+      [220, 545, 305, 12,  0.18],
+      [320, 415, 205, 12, -0.25],
+      [140, 295, 255, 12,  0.12],
+      [310, 178, 205, 12, -0.18],
+      [200, 103, 245, 12],
+      [382, 148,  12,  90],
+    ]
+  }
+];
+
+// ── Load level ─────────────────────────────────────────────
+function loadLevel(idx) {
+  mkEngine();
+  wallBodies = []; ballBody = null;
+  particles = []; trail = [];
+  shots = 0; stopTmr = 0;
+  gs = S.AIM;
+
+  const L = LEVELS[idx];
+  ballStart = { x: L.ball[0], y: L.ball[1] };
+
+  // Borders
+  const borders = [
+    [GW/2, GH+10, GW, 20, 0],
+    [-10,  GH/2,  20, GH, 0],
+    [GW+10,GH/2,  20, GH, 0],
+    [GW/2, -10,   GW, 20, 0],
+  ];
+  for (const [bx,by,bw,bh,ba] of borders) {
+    const b = Bodies.rectangle(bx,by,bw,bh,
+      { isStatic:true, restitution:0.65, friction:0.04, label:'wall' });
+    Body.setAngle(b, ba);
+    World.add(world, b);
+    wallBodies.push({ body:b, isBorder:true });
+  }
+
+  // Level walls
+  for (const [wx,wy,ww,wh,wa=0] of L.walls) {
+    const b = Bodies.rectangle(wx,wy,ww,wh,
+      { isStatic:true, restitution:0.72, friction:0.04, label:'wall' });
+    Body.setAngle(b, wa);
+    World.add(world, b);
+    wallBodies.push({ body:b, isBorder:false });
+  }
+
+  // Ball (static until shot)
+  ballBody = Bodies.circle(L.ball[0], L.ball[1], 11, {
+    restitution:0.70, friction:0.05, frictionAir:0.010,
+    density:0.003, label:'ball', isStatic:true
+  });
+  World.add(world, ballBody);
+
+  // Goal sensor
+  const goalSensor = Bodies.circle(L.goal[0], L.goal[1], L.goal[2]+5, {
+    isStatic:true, isSensor:true, label:'goal'
+  });
+  World.add(world, goalSensor);
+
+  Events.on(engine, 'collisionStart', evt => {
+    for (const { bodyA, bodyB } of evt.pairs) {
+      const a = bodyA.label, b = bodyB.label;
+      if (gs === S.FLY) {
+        if ((a==='ball'&&b==='goal')||(a==='goal'&&b==='ball')) win();
+        if ((a==='ball'&&b==='wall')||(a==='wall'&&b==='ball')) {
+          const p = a==='ball' ? bodyA.position : bodyB.position;
+          burst(p.x, p.y, '#ff7043', 10);
+        }
+      }
+    }
+  });
+}
+
+// ── Shoot ──────────────────────────────────────────────────
+const MAX_PWR = 22, BALL_R = 11;
+
+function shoot(tx, ty) {
+  if (gs !== S.AIM) return;
+  const L = LEVELS[lvlIdx];
+  if (shots >= L.shots) return;
+  const dx = ballStart.x - tx, dy = ballStart.y - ty;
+  const d  = Math.hypot(dx, dy);
+  if (d < 10) return;
+
+  const pwr = Math.min(d / 9, MAX_PWR);
+  Body.setPosition(ballBody, { x: ballStart.x, y: ballStart.y });
+  Body.setVelocity(ballBody,  { x: 0, y: 0 });
+  Body.setStatic(ballBody, false);
+  Body.setVelocity(ballBody,  { x: (dx/d)*pwr, y: (dy/d)*pwr });
+  shots++; stopTmr = 0; trail = [];
+  gs = S.FLY;
+}
+
+// ── Win / Fail ─────────────────────────────────────────────
+function win() {
+  gs = S.WIN;
+  burst(LEVELS[lvlIdx].goal[0], LEVELS[lvlIdx].goal[1], '#ffd700', 55);
+  Body.setStatic(ballBody, true);
+}
+
+function checkStop() {
+  if (gs !== S.FLY || !ballBody) return;
+  const v   = ballBody.velocity;
+  const spd = Math.hypot(v.x, v.y);
+  const py  = ballBody.position.y;
+  if (py > GH + 80 || spd < 0.18) {
+    if (++stopTmr > 28) {
+      Body.setStatic(ballBody, true);
+      Body.setPosition(ballBody, { x: ballStart.x, y: ballStart.y });
+      Body.setVelocity(ballBody,  { x: 0, y: 0 });
+      stopTmr = 0;
+      gs = shots >= LEVELS[lvlIdx].shots ? S.FAIL : S.AIM;
+    }
+  } else { stopTmr = 0; }
+}
+
+// ── Particles ──────────────────────────────────────────────
+function burst(x, y, col, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = Math.random() * 5 + 1;
+    particles.push({
+      x, y, col,
+      vx: Math.cos(a)*s, vy: Math.sin(a)*s,
+      r:  2 + Math.random()*3,
+      life: 1, dec: 0.022 + Math.random()*0.02
+    });
+  }
+}
+function tickParticles() {
+  for (let i = particles.length-1; i >= 0; i--) {
+    const p = particles[i];
+    p.vy += 0.13; p.vx *= 0.96;
+    p.x += p.vx; p.y += p.vy;
+    p.life -= p.dec;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+// ── Trajectory preview ─────────────────────────────────────
+// GR is tuned to approximate matter-js gravity visually
+const TRAJ_GR = 0.40;
+
+function trajectory(sx, sy, vx, vy) {
+  const pts = [];
+  const REST = 0.68, R = BALL_R;
+  const L = LEVELS[lvlIdx];
+  let cx = sx, cy = sy, cvx = vx, cvy = vy, bounces = 0;
+
+  for (let i = 0; i < 300; i++) {
+    cvy += TRAJ_GR;
+    cx += cvx; cy += cvy;
+
+    // Canvas edges
+    if (cx < R)       { cx = R;       cvx =  Math.abs(cvx)*REST; bounces++; }
+    if (cx > GW - R)  { cx = GW-R;    cvx = -Math.abs(cvx)*REST; bounces++; }
+    if (cy < R)       { cy = R;       cvy =  Math.abs(cvy)*REST; bounces++; }
+    if (cy > GH + 60) break;
+
+    // Axis-aligned walls only (skip angled — approximate is fine)
+    for (const [wx,wy,ww,wh,wa=0] of L.walls) {
+      if (Math.abs(wa) > 0.05) continue;
+      const l = wx - ww/2 - R, r = wx + ww/2 + R;
+      const t = wy - wh/2 - R, b = wy + wh/2 + R;
+      if (cx > l && cx < r && cy > t && cy < b) {
+        const px = cx - cvx, py = cy - cvy;
+        if (px <= l || px >= r) { cvx *= -REST; cx = cvx > 0 ? r+1 : l-1; }
+        else                    { cvy *= -REST; cy = cvy > 0 ? b+1 : t-1; }
+        bounces++;
+      }
+    }
+
+    if (i % 3 === 0) pts.push({ x: cx, y: cy });
+    if (bounces > 8) break;
+  }
+  return pts;
+}
+
+// ── Draw helpers ───────────────────────────────────────────
+function roundRect(x, y, w, h, r) {
+  ct.beginPath();
+  ct.moveTo(x+r, y);
+  ct.arcTo(x+w, y,   x+w, y+h, r);
+  ct.arcTo(x+w, y+h, x,   y+h, r);
+  ct.arcTo(x,   y+h, x,   y,   r);
+  ct.arcTo(x,   y,   x+w, y,   r);
+  ct.closePath();
+}
+
+// ── Draw: background ───────────────────────────────────────
+function drawBG() {
+  ct.fillStyle = '#080818';
+  ct.fillRect(0, 0, GW, GH);
+  ct.fillStyle = 'rgba(255,255,255,0.022)';
+  for (let x = 25; x < GW; x += 30)
+    for (let y = 25; y < GH; y += 30) {
+      ct.beginPath(); ct.arc(x, y, 1, 0, Math.PI*2); ct.fill();
+    }
+}
+
+// ── Draw: walls ────────────────────────────────────────────
+function drawWalls() {
+  for (const { body, isBorder } of wallBodies) {
+    if (isBorder) continue;
+    const v = body.vertices;
+    ct.save();
+    ct.shadowColor = '#4ecdc4';
+    ct.shadowBlur  = 14;
+    const g = ct.createLinearGradient(v[0].x, v[0].y, v[2].x, v[2].y);
+    g.addColorStop(0, '#4ecdc4');
+    g.addColorStop(1, '#1b8c84');
+    ct.fillStyle = g;
+    ct.beginPath();
+    ct.moveTo(v[0].x, v[0].y);
+    for (let i = 1; i < v.length; i++) ct.lineTo(v[i].x, v[i].y);
+    ct.closePath(); ct.fill();
+    ct.shadowBlur = 0;
+    ct.restore();
+  }
+}
+
+// ── Draw: goal ─────────────────────────────────────────────
+function drawGoal() {
+  const [gx, gy, gr] = LEVELS[lvlIdx].goal;
+  const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 420);
+
+  const pg = ct.createRadialGradient(gx,gy,0, gx,gy,gr*3.2);
+  pg.addColorStop(0, `rgba(255,215,0,${0.28*pulse})`);
+  pg.addColorStop(1, 'rgba(255,215,0,0)');
+  ct.fillStyle = pg;
+  ct.beginPath(); ct.arc(gx, gy, gr*3.2, 0, Math.PI*2); ct.fill();
+
+  ct.shadowColor = '#ffd700'; ct.shadowBlur = 20;
+  ct.strokeStyle = '#ffd700'; ct.lineWidth = 2.5;
+  ct.fillStyle   = 'rgba(255,215,0,0.10)';
+  ct.beginPath(); ct.arc(gx, gy, gr, 0, Math.PI*2);
+  ct.fill(); ct.stroke();
+  ct.shadowBlur = 0;
+
+  ct.fillStyle = '#ffd700';
+  ct.font = `${Math.round(gr * 1.15)}px serif`;
+  ct.textAlign = 'center'; ct.textBaseline = 'middle';
+  ct.fillText('★', gx, gy);
+}
+
+// ── Draw: ball ─────────────────────────────────────────────
+function drawBall() {
+  if (!ballBody) return;
+  const { x, y } = ballBody.position;
+  ct.shadowColor = '#ff6b35'; ct.shadowBlur = 20;
+  const g = ct.createRadialGradient(x-3,y-3,1, x,y,BALL_R);
+  g.addColorStop(0,   '#ffaa88');
+  g.addColorStop(0.5, '#ff6b35');
+  g.addColorStop(1,   '#c84400');
+  ct.fillStyle = g;
+  ct.beginPath(); ct.arc(x, y, BALL_R, 0, Math.PI*2); ct.fill();
+  ct.shadowBlur = 0;
+}
+
+// ── Draw: trail ────────────────────────────────────────────
+function drawTrail() {
+  for (let i = 1; i < trail.length; i++) {
+    const a = (i / trail.length) * 0.45;
+    ct.strokeStyle = `rgba(255,107,53,${a})`;
+    ct.lineWidth = 2;
+    ct.beginPath();
+    ct.moveTo(trail[i-1].x, trail[i-1].y);
+    ct.lineTo(trail[i].x,   trail[i].y);
+    ct.stroke();
+  }
+}
+
+// ── Draw: aim line ─────────────────────────────────────────
+function drawAim() {
+  if (!dragging || gs !== S.AIM) return;
+  const dx = ballStart.x - mx, dy = ballStart.y - my;
+  const d  = Math.hypot(dx, dy);
+  if (d < 10) return;
+
+  const pwr = Math.min(d / 9, MAX_PWR);
+  const pts = trajectory(ballStart.x, ballStart.y, (dx/d)*pwr, (dy/d)*pwr);
+
+  for (let i = 0; i < pts.length; i++) {
+    const a = (1 - i / pts.length) * 0.85;
+    const r = 3 * (1 - i / pts.length) + 1;
+    ct.fillStyle = `rgba(255,107,53,${a})`;
+    ct.beginPath(); ct.arc(pts[i].x, pts[i].y, r, 0, Math.PI*2); ct.fill();
+  }
+
+  // Power bar
+  const pct = pwr / MAX_PWR;
+  const bw = 80, bh = 7, bx = ballStart.x - bw/2, by = ballStart.y + 24;
+  ct.fillStyle = 'rgba(0,0,0,0.5)';
+  roundRect(bx, by, bw, bh, 4); ct.fill();
+  ct.fillStyle = pct < 0.4 ? '#4ecdc4' : pct < 0.75 ? '#ffd700' : '#ff4444';
+  roundRect(bx, by, bw * pct, bh, 4); ct.fill();
+}
+
+// ── Draw: particles ────────────────────────────────────────
+function drawParticles() {
+  ct.save();
+  for (const p of particles) {
+    ct.globalAlpha  = p.life;
+    ct.fillStyle    = p.col;
+    ct.shadowColor  = p.col;
+    ct.shadowBlur   = 8;
+    ct.beginPath(); ct.arc(p.x, p.y, p.r * p.life, 0, Math.PI*2); ct.fill();
+  }
+  ct.restore();
+  ct.shadowBlur = 0;
+}
+
+// ── Draw: HUD ──────────────────────────────────────────────
+function drawHUD() {
+  const L = LEVELS[lvlIdx];
+
+  // Level name
+  ct.fillStyle = 'rgba(0,0,0,0.60)';
+  roundRect(10, 10, 215, 54, 10); ct.fill();
+  ct.fillStyle = '#fff';
+  ct.font = 'bold 13px system-ui'; ct.textAlign = 'left'; ct.textBaseline = 'top';
+  ct.fillText(`Lvl ${lvlIdx+1}  ${L.name}`, 20, 18);
+  ct.fillStyle = '#666';
+  ct.font = '11px system-ui';
+  ct.fillText(L.sub, 20, 38);
+
+  // Shot dots
+  const shotsLeft = L.shots - shots;
+  ct.fillStyle = 'rgba(0,0,0,0.60)';
+  roundRect(GW-118, 10, 108, 54, 10); ct.fill();
+  ct.fillStyle = '#888';
+  ct.font = 'bold 10px system-ui'; ct.textAlign = 'right'; ct.textBaseline = 'top';
+  ct.fillText('SHOTS', GW-18, 18);
+  for (let i = 0; i < Math.min(L.shots, 6); i++) {
+    const dx = GW - 108 + i * 18;
+    ct.beginPath(); ct.arc(dx, 44, 6, 0, Math.PI*2);
+    if (i < shotsLeft) {
+      ct.fillStyle = '#ff6b35'; ct.shadowColor = '#ff6b35'; ct.shadowBlur = 10;
+    } else {
+      ct.fillStyle = '#222'; ct.shadowBlur = 0;
+    }
+    ct.fill();
+  }
+  ct.shadowBlur = 0;
+
+  if (gs === S.AIM && shots === 0) {
+    ct.fillStyle = 'rgba(255,255,255,0.45)';
+    ct.font = '13px system-ui'; ct.textAlign = 'center';
+    ct.textBaseline = 'bottom';
+    ct.fillText('Drag to aim  •  Release to shoot', GW/2, GH - 22);
+  }
+}
+
+// ── Overlay card ───────────────────────────────────────────
+function drawCard(title, icon, btnText, accentColor, subText) {
+  ct.fillStyle = 'rgba(0,0,0,0.74)';
+  ct.fillRect(0, 0, GW, GH);
+
+  const cy = GH/2 - 130;
+  ct.fillStyle = '#0e0e28';
+  ct.strokeStyle = accentColor;
+  ct.lineWidth   = 2;
+  ct.shadowColor = accentColor; ct.shadowBlur = 30;
+  roundRect(35, cy, GW-70, 260, 18); ct.fill(); ct.stroke();
+  ct.shadowBlur = 0;
+
+  ct.font = '54px serif'; ct.textAlign = 'center'; ct.textBaseline = 'middle';
+  ct.fillText(icon, GW/2, cy + 62);
+
+  ct.fillStyle = accentColor;
+  ct.font = 'bold 23px system-ui';
+  ct.fillText(title, GW/2, cy + 122);
+
+  ct.fillStyle = '#777';
+  ct.font = '13px system-ui';
+  ct.fillText(subText, GW/2, cy + 152);
+
+  ct.fillStyle = accentColor;
+  ct.shadowColor = accentColor; ct.shadowBlur = 20;
+  roundRect(GW/2-88, cy+175, 176, 52, 12); ct.fill();
+  ct.shadowBlur = 0;
+  ct.fillStyle = accentColor === '#ffd700' ? '#000' : '#fff';
+  ct.font = 'bold 15px system-ui';
+  ct.fillText(btnText, GW/2, cy + 203);
+}
+
+// ── Menu screen ────────────────────────────────────────────
+function drawMenu() {
+  drawBG();
+
+  // Hero ball
+  ct.shadowColor = '#ff6b35'; ct.shadowBlur = 45;
+  const g = ct.createRadialGradient(GW/2-10, 138, 6, GW/2, 150, 52);
+  g.addColorStop(0, '#ffaa88'); g.addColorStop(0.5, '#ff6b35'); g.addColorStop(1, '#c84400');
+  ct.fillStyle = g;
+  ct.beginPath(); ct.arc(GW/2, 150, 52, 0, Math.PI*2); ct.fill();
+  ct.shadowBlur = 0;
+
+  ct.fillStyle = '#fff'; ct.font = 'bold 33px system-ui';
+  ct.textAlign = 'center'; ct.textBaseline = 'top';
+  ct.fillText('BOUNCE MAZE', GW/2, 220);
+  ct.fillStyle = '#555'; ct.font = '13px system-ui';
+  ct.fillText('Physics puzzle  •  Can you rage quit?', GW/2, 260);
+
+  for (let i = 0; i < LEVELS.length; i++) {
+    const L   = LEVELS[i];
+    const by  = 300 + i * 68;
+    const rage = i === LEVELS.length - 1;
+
+    ct.fillStyle   = rage ? 'rgba(255,68,68,0.10)' : 'rgba(78,205,196,0.07)';
+    ct.strokeStyle = rage ? '#ff4444' : '#4ecdc4';
+    ct.lineWidth   = 1.5;
+    ct.shadowColor = ct.strokeStyle; ct.shadowBlur = 8;
+    roundRect(35, by, GW-70, 54, 12); ct.fill(); ct.stroke();
+    ct.shadowBlur = 0;
+
+    ct.fillStyle = rage ? '#ff4444' : '#4ecdc4';
+    ct.font = 'bold 13px system-ui'; ct.textAlign = 'left'; ct.textBaseline = 'middle';
+    ct.fillText(`${i+1}.  ${L.name}`, 55, by + 20);
+
+    ct.fillStyle = '#555'; ct.font = '11px system-ui';
+    ct.fillText(L.sub, 55, by + 38);
+
+    ct.fillStyle = '#555'; ct.textAlign = 'right'; ct.font = '12px system-ui';
+    ct.fillText(`${L.shots} shot${L.shots > 1 ? 's' : ''}`, GW - 55, by + 27);
+  }
+}
+
+// ── Input ──────────────────────────────────────────────────
+function evPos(e) {
+  const r = C.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return { x: (t.clientX - r.left) / SCALE, y: (t.clientY - r.top) / SCALE };
+}
+
+function onDown(e) {
+  e.preventDefault();
+  const p = evPos(e); mx = p.x; my = p.y;
+
+  if (gs === S.MENU) {
+    for (let i = 0; i < LEVELS.length; i++) {
+      const by = 300 + i * 68;
+      if (mx > 35 && mx < GW-35 && my > by && my < by+54) {
+        lvlIdx = i; loadLevel(i);
+      }
+    }
+    return;
+  }
+
+  const cardY = GH/2 - 130;
+  if (gs === S.WIN) {
+    if (my > cardY+175 && my < cardY+227 && mx > GW/2-88 && mx < GW/2+88) {
+      if (lvlIdx >= LEVELS.length - 1) gs = S.MENU;
+      else loadLevel(++lvlIdx);
+    }
+    return;
+  }
+  if (gs === S.FAIL) {
+    if (my > cardY+175 && my < cardY+227 && mx > GW/2-88 && mx < GW/2+88)
+      loadLevel(lvlIdx);
+    return;
+  }
+  if (gs === S.AIM) dragging = true;
+}
+
+function onMove(e) {
+  if (e.cancelable) e.preventDefault();
+  const p = evPos(e); mx = p.x; my = p.y;
+}
+
+function onUp(e) {
+  if (gs === S.AIM && dragging) shoot(mx, my);
+  dragging = false;
+}
+
+C.addEventListener('mousedown',  onDown);
+C.addEventListener('mousemove',  onMove);
+C.addEventListener('mouseup',    onUp);
+C.addEventListener('touchstart', onDown, { passive: false });
+C.addEventListener('touchmove',  onMove, { passive: false });
+C.addEventListener('touchend',   onUp);
+
+// ── Game loop ──────────────────────────────────────────────
+function loop() {
+  requestAnimationFrame(loop);
+  tickParticles();
+
+  if (gs === S.MENU) { drawMenu(); return; }
+
+  if (gs === S.FLY) {
+    Engine.update(engine, 1000/60);
+    if (ballBody) {
+      const { x, y } = ballBody.position;
+      trail.push({ x, y });
+      if (trail.length > 38) trail.shift();
+    }
+    checkStop();
+  }
+
+  drawBG();
+  drawTrail();
+  drawWalls();
+  drawGoal();
+  drawBall();
+  drawAim();
+  drawParticles();
+  drawHUD();
+
+  if (gs === S.WIN) {
+    const isLast = lvlIdx >= LEVELS.length - 1;
+    drawCard(
+      'Level Clear!', '🎉',
+      isLast ? '↺ Play Again' : 'Next Level →',
+      '#ffd700',
+      `Solved in ${shots} shot${shots !== 1 ? 's' : ''}`
+    );
+  }
+  if (gs === S.FAIL) {
+    drawCard('Out of Shots!', '💀', '↺ Try Again', '#ff4444', 'So close... try again');
+  }
+}
+
+// ── Start ──────────────────────────────────────────────────
+gs = S.MENU;
+mkEngine();
+loop();
+</script>
+</body>
+</html>
