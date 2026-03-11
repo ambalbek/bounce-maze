@@ -49,7 +49,7 @@ let engine, world;
 
 function mkEngine() {
   if (engine) World.clear(world, false);
-  engine = Engine.create({ gravity: { x: 0, y: 1, scale: 0.0018 } });
+  engine = Engine.create({ gravity: { x: 0, y: 1, scale: 0.0014 } });
   world  = engine.world;
 }
 
@@ -160,7 +160,7 @@ function loadLevel(idx) {
   ];
   for (const [bx,by,bw,bh,ba] of borders) {
     const b = Bodies.rectangle(bx,by,bw,bh,
-      { isStatic:true, restitution:0.65, friction:0.04, label:'wall' });
+      { isStatic:true, restitution:0.90, friction:0.0, label:'wall' });
     Body.setAngle(b, ba);
     World.add(world, b);
     wallBodies.push({ body:b, isBorder:true });
@@ -169,7 +169,7 @@ function loadLevel(idx) {
   // Level walls
   for (const [wx,wy,ww,wh,wa=0] of L.walls) {
     const b = Bodies.rectangle(wx,wy,ww,wh,
-      { isStatic:true, restitution:0.72, friction:0.04, label:'wall' });
+      { isStatic:true, restitution:0.90, friction:0.0, label:'wall' });
     Body.setAngle(b, wa);
     World.add(world, b);
     wallBodies.push({ body:b, isBorder:false });
@@ -177,7 +177,7 @@ function loadLevel(idx) {
 
   // Ball (static until shot)
   ballBody = Bodies.circle(L.ball[0], L.ball[1], 11, {
-    restitution:0.70, friction:0.05, frictionAir:0.010,
+    restitution:0.90, friction:0.0, frictionAir:0.004,
     density:0.003, label:'ball', isStatic:true
   });
   World.add(world, ballBody);
@@ -274,7 +274,7 @@ const TRAJ_GR = 0.50;
 
 function trajectory(sx, sy, vx, vy) {
   const pts = [];
-  const REST = 0.68, R = BALL_R;
+  const REST = 0.88, R = BALL_R;
   const L = LEVELS[lvlIdx];
   let cx = sx, cy = sy, cvx = vx, cvy = vy, bounces = 0;
 
