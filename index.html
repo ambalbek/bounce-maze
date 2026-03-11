@@ -71,71 +71,90 @@ let ballStart = { x: 0, y: 0 };
 // goal:  [gx, gy, radius]
 const LEVELS = [
   {
+    // Tutorial: straight shot, huge goal, no walls
     name: 'First Shot',
-    sub:  'Drag the ball DOWN to shoot UP',
+    sub:  'Drag the ball to aim',
     shots: 8,
-    ball: [200, 530],      // center of screen
-    goal: [200, 120, 38],  // directly above, massive goal
+    ball: [200, 530],
+    goal: [200, 120, 36],
     walls: []
   },
   {
-    name: 'Warm Up',
-    sub:  'Aim for the star',
+    // Intro walls: one wall blocks direct path, must go around or bounce
+    name: 'Side Step',
+    sub:  'One wall in the way',
     shots: 6,
     ball: [80, 560],
-    goal: [320, 150, 28],
-    walls: []
+    goal: [320, 140, 28],
+    walls: [
+      [200, 360, 14, 260],  // vertical wall in the middle
+    ]
   },
   {
+    // First real bounce: one platform to bounce off
+    name: 'First Bounce',
+    sub:  'Bounce off the platform',
+    shots: 5,
+    ball: [60, 580],
+    goal: [340, 130, 24],
+    walls: [
+      [310, 390, 180, 14],  // horizontal platform on right
+    ]
+  },
+  {
+    // Two bounces, generous goal
     name: 'Two Step',
     sub:  'Two bounces needed',
     shots: 4,
     ball: [55, 600],
-    goal: [345, 100, 20],
+    goal: [340, 110, 20],
     walls: [
-      [240, 490, 230, 13],
-      [120, 310, 180, 13],
+      [240, 490, 220, 13],
+      [110, 320, 170, 13],
     ]
   },
   {
+    // Zigzag, tighter goal
     name: 'Zigzag',
-    sub:  'Precision required',
+    sub:  'Thread the needle',
     shots: 3,
     ball: [50, 620],
-    goal: [355, 75, 17],
+    goal: [350, 80, 17],
     walls: [
-      [255, 520, 255, 12,  0.15],
-      [ 95, 405, 205, 12, -0.15],
-      [300, 275, 225, 12,  0.10],
-      [ 95, 160, 195, 12],
+      [255, 510, 250, 12],
+      [ 90, 390, 190, 12],
+      [290, 270, 220, 12],
+      [ 90, 155, 180, 12],
     ]
   },
   {
+    // The Box: enlarged goal + 3 shots so it's frustrating but beatable
     name: 'The Box',
-    sub:  "There's a way out...",
-    shots: 2,
+    sub:  "Find the gap...",
+    shots: 3,
     ball: [200, 610],
-    goal: [48, 78, 15],
+    goal: [55, 90, 20],
     walls: [
-      [255, 445, 205, 12],
-      [358, 363, 12,  164],
-      [255, 280, 205, 12],
-      [ 88, 395, 12,  330],
+      [255, 450, 200, 12],
+      [355, 370, 12, 160],
+      [255, 290, 200, 12],
+      [ 90, 390, 12, 320],
     ]
   },
   {
+    // Rage: 2 shots instead of 1 — still brutal but not impossible
     name: '☠ RAGE MODE ☠',
-    sub:  '1 shot. Tiny goal. RIP.',
-    shots: 1,
+    sub:  '2 shots. Tiny goal. Good luck.',
+    shots: 2,
     ball: [45, 640],
-    goal: [368, 48, 12],
+    goal: [365, 52, 14],
     walls: [
-      [220, 545, 305, 12,  0.18],
-      [320, 415, 205, 12, -0.25],
-      [140, 295, 255, 12,  0.12],
-      [310, 178, 205, 12, -0.18],
-      [200, 103, 245, 12],
-      [382, 148,  12,  90],
+      [220, 540, 300, 12,  0.18],
+      [320, 415, 200, 12, -0.25],
+      [140, 295, 250, 12,  0.12],
+      [310, 180, 200, 12, -0.18],
+      [200, 105, 240, 12],
+      [378, 150,  12,  88],
     ]
   }
 ];
@@ -160,7 +179,7 @@ function loadLevel(idx) {
   ];
   for (const [bx,by,bw,bh,ba] of borders) {
     const b = Bodies.rectangle(bx,by,bw,bh,
-      { isStatic:true, restitution:0.90, friction:0.0, label:'wall' });
+      { isStatic:true, restitution:0.80, friction:0.0, label:'wall' });
     Body.setAngle(b, ba);
     World.add(world, b);
     wallBodies.push({ body:b, isBorder:true });
@@ -169,7 +188,7 @@ function loadLevel(idx) {
   // Level walls
   for (const [wx,wy,ww,wh,wa=0] of L.walls) {
     const b = Bodies.rectangle(wx,wy,ww,wh,
-      { isStatic:true, restitution:0.90, friction:0.0, label:'wall' });
+      { isStatic:true, restitution:0.80, friction:0.0, label:'wall' });
     Body.setAngle(b, wa);
     World.add(world, b);
     wallBodies.push({ body:b, isBorder:false });
@@ -177,7 +196,7 @@ function loadLevel(idx) {
 
   // Ball (static until shot)
   ballBody = Bodies.circle(L.ball[0], L.ball[1], 11, {
-    restitution:0.90, friction:0.0, frictionAir:0.004,
+    restitution:0.80, friction:0.0, frictionAir:0.012,
     density:0.003, label:'ball', isStatic:true
   });
   World.add(world, ballBody);
@@ -203,7 +222,7 @@ function loadLevel(idx) {
 }
 
 // ── Shoot ──────────────────────────────────────────────────
-const MAX_PWR = 62, BALL_R = 11;
+const MAX_PWR = 38, BALL_R = 11;
 
 function shoot(tx, ty) {
   if (gs !== S.AIM) return;
@@ -274,7 +293,7 @@ const TRAJ_GR = 0.50;
 
 function trajectory(sx, sy, vx, vy) {
   const pts = [];
-  const REST = 0.88, R = BALL_R;
+  const REST = 0.78, R = BALL_R;
   const L = LEVELS[lvlIdx];
   let cx = sx, cy = sy, cvx = vx, cvy = vy, bounces = 0;
 
